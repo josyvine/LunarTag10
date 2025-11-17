@@ -2,8 +2,8 @@ package com.lunartag.app.model;
 
 /**
  * A simple data model class (POJO) to represent the global feature toggles
- * that are controlled remotely. This structure matches the data sent via FCM
- * and stored locally, based on the 'features/global' document in Firestore.
+ * that are controlled remotely. This structure matches the data sent via a silent FCM push message
+ * and is stored locally in SharedPreferences.
  */
 public class GlobalFeatures {
 

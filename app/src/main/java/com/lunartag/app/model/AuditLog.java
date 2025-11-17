@@ -1,33 +1,38 @@
 package com.lunartag.app.model;
 
-import com.google.firebase.firestore.ServerTimestamp;
-import java.util.Date;
-import java.util.Map;
+import androidx.room.Entity;
+import androidx.room.PrimaryKey;
 
 /**
- * A simple data model class (POJO) to represent an audit log entry.
- * This object structure will be used to save data to the Firestore 'auditLogs' collection.
+ * A data model class that represents an audit log record in the local Room database.
+ * An entry is created for every critical action performed in the app.
  */
+@Entity(tableName = "audit_logs")
 public class AuditLog {
 
-    private String photoId;
-    private String action; // e.g., "CAPTURE", "ASSIGN", "SEND_ATTEMPT"
-    private String actorId; // A unique device ID, since there is no user login
-    private Map<String, Object> details; // A flexible map for extra details
+    @PrimaryKey(autoGenerate = true)
+    public long id;
 
-    @ServerTimestamp
-    private Date timestamp;
-
-    // A no-argument constructor is required for Firestore data mapping
-    public AuditLog() {}
+    private long photoId; // The ID of the photo this log is related to
+    private String action; // e.g., "CAPTURE", "ASSIGN", "SEND_ATTEMPT", "SEND_SUCCESS", "SEND_FAILED"
+    private String details; // A string to store extra details, potentially as JSON
+    private long timestamp; // Stored as long (milliseconds) for Room
 
     // --- Getters and Setters for all fields ---
 
-    public String getPhotoId() {
+    public long getId() {
+        return id;
+    }
+
+    public void setId(long id) {
+        this.id = id;
+    }
+
+    public long getPhotoId() {
         return photoId;
     }
 
-    public void setPhotoId(String photoId) {
+    public void setPhotoId(long photoId) {
         this.photoId = photoId;
     }
 
@@ -39,27 +44,19 @@ public class AuditLog {
         this.action = action;
     }
 
-    public String getActorId() {
-        return actorId;
-    }
-
-    public void setActorId(String actorId) {
-        this.actorId = actorId;
-    }
-
-    public Map<String, Object> getDetails() {
+    public String getDetails() {
         return details;
     }
 
-    public void setDetails(Map<String, Object> details) {
+    public void setDetails(String details) {
         this.details = details;
     }
 
-    public Date getTimestamp() {
+    public long getTimestamp() {
         return timestamp;
     }
 
-    public void setTimestamp(Date timestamp) {
+    public void setTimestamp(long timestamp) {
         this.timestamp = timestamp;
     }
 }

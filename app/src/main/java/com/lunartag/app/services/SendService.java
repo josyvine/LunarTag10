@@ -5,7 +5,9 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
@@ -26,6 +28,15 @@ public class SendService extends Service {
     private static final int NOTIFICATION_ID = 101;
 
     public static final String EXTRA_FILE_PATH = "com.lunartag.app.EXTRA_FILE_PATH";
+
+    // Prefs to read settings (User input)
+    private static final String PREFS_SETTINGS = "LunarTagSettings";
+    private static final String KEY_WHATSAPP_GROUP = "whatsapp_group";
+
+    // Prefs to communicate with Accessibility Service (The Bridge)
+    private static final String PREFS_ACCESSIBILITY = "LunarTagAccessPrefs";
+    private static final String KEY_TARGET_GROUP = "target_group_name";
+    private static final String KEY_JOB_PENDING = "job_is_pending";
 
     @Override
     public void onCreate() {
@@ -50,10 +61,12 @@ public class SendService extends Service {
             return START_NOT_STICKY;
         }
 
-        // --- FIX: Create a "Clickable" Notification instead of auto-launching ---
-        // Android 10+ blocks starting activities from background. 
-        // We must use a High-Priority notification that the user taps to launch WhatsApp.
+        // --- STEP 1: "Arm" the Accessibility Service ---
+        // We retrieve the group name ("Love") and save it where the Accessibility Service can see it.
+        armAccessibilityService();
 
+        // --- STEP 2: Prepare the Notification ---
+        
         // 1. Prepare the URI
         Uri imageUri = FileProvider.getUriForFile(
                 this,
@@ -61,7 +74,7 @@ public class SendService extends Service {
                 imageFile
         );
 
-        // 2. Create the Intent that opens WhatsApp (SAME as before)
+        // 2. Create the Intent that opens WhatsApp
         Intent shareIntent = new Intent(Intent.ACTION_SEND);
         shareIntent.setType("image/*");
         shareIntent.putExtra(Intent.EXTRA_STREAM, imageUri);
@@ -69,7 +82,7 @@ public class SendService extends Service {
         shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         shareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
 
-        // 3. Wrap it in a PendingIntent (This makes it "wait" for the click)
+        // 3. Wrap it in a PendingIntent 
         PendingIntent pendingIntent = PendingIntent.getActivity(
                 this,
                 0,
@@ -81,26 +94,43 @@ public class SendService extends Service {
         Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("Scheduled Photo Ready")
                 .setContentText("Tap here to send to WhatsApp Group")
-                .setSmallIcon(R.drawable.ic_camera) // Your app icon
-                .setContentIntent(pendingIntent) // Connect the click to the intent
-                .setPriority(NotificationCompat.PRIORITY_HIGH) // Pop up on screen
-                .setCategory(NotificationCompat.CATEGORY_ALARM) // Ensure it rings through DND
-                .setAutoCancel(true) // Dismiss when clicked
+                .setSmallIcon(R.drawable.ic_camera) 
+                .setContentIntent(pendingIntent) 
+                .setPriority(NotificationCompat.PRIORITY_HIGH) 
+                .setCategory(NotificationCompat.CATEGORY_ALARM) 
+                .setAutoCancel(true) 
                 .build();
 
         // 5. Show it immediately
         startForeground(NOTIFICATION_ID, notification);
         
-        Log.d(TAG, "Notification posted. Waiting for user tap.");
+        Log.d(TAG, "Notification posted. Accessibility armed. Waiting for user tap.");
 
-        // We do NOT stopSelf() immediately. We leave the notification active.
-        // The OS will eventually clean it up, or the user will click it.
         return START_NOT_STICKY;
+    }
+
+    /**
+     * Reads the Group Name from settings and flags it for the Accessibility Service.
+     */
+    private void armAccessibilityService() {
+        SharedPreferences settings = getSharedPreferences(PREFS_SETTINGS, Context.MODE_PRIVATE);
+        String groupName = settings.getString(KEY_WHATSAPP_GROUP, "");
+
+        if (groupName != null && !groupName.isEmpty()) {
+            // Write this to the shared memory bridge
+            SharedPreferences accessPrefs = getSharedPreferences(PREFS_ACCESSIBILITY, Context.MODE_PRIVATE);
+            accessPrefs.edit()
+                    .putString(KEY_TARGET_GROUP, groupName)
+                    .putBoolean(KEY_JOB_PENDING, true)
+                    .apply();
+            Log.d(TAG, "Accessibility Armed for Group: " + groupName);
+        } else {
+            Log.w(TAG, "No WhatsApp Group set in Settings. Automation will be skipped.");
+        }
     }
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // IMPORTANCE_HIGH is critical for the "Heads Up" banner to appear over other apps
             NotificationChannel serviceChannel = new NotificationChannel(
                     CHANNEL_ID,
                     "Scheduled Send Notifications",
@@ -119,7 +149,6 @@ public class SendService extends Service {
     @Nullable
     @Override
     public IBinder onBind(Intent intent) {
-        // This is a started service, not a bound service.
         return null;
     }
 }

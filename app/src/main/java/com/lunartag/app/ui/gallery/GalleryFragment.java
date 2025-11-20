@@ -1,11 +1,13 @@
 package com.lunartag.app.ui.gallery;
 
-import android.os.Bundle; 
+import android.app.AlertDialog;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -16,7 +18,9 @@ import com.lunartag.app.data.AppDatabase;
 import com.lunartag.app.data.PhotoDao;
 import com.lunartag.app.databinding.FragmentGalleryBinding;
 import com.lunartag.app.model.Photo;
+import com.lunartag.app.utils.Scheduler;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -47,64 +51,143 @@ public class GalleryFragment extends Fragment {
         GridLayoutManager layoutManager = new GridLayoutManager(getContext(), 3);
         binding.recyclerViewGallery.setLayoutManager(layoutManager);
         
-        // Initialize adapter with empty list first
+        // Initialize adapter
         adapter = new GalleryAdapter(getContext(), photoList);
         binding.recyclerViewGallery.setAdapter(adapter);
+
+        // --- Setup Selection Logic ---
+        setupSelectionListeners();
+    }
+
+    private void setupSelectionListeners() {
+        // 1. Listen for updates from the Adapter (when user clicks photos)
+        adapter.setSelectionListener(count -> {
+            if (count > 0) {
+                showSelectionToolbar(count);
+            } else {
+                hideSelectionToolbar();
+            }
+        });
+
+        // 2. Close Button (X)
+        binding.btnCloseSelection.setOnClickListener(v -> {
+            adapter.clearSelection();
+            hideSelectionToolbar();
+        });
+
+        // 3. Select All Button
+        binding.btnSelectAll.setOnClickListener(v -> {
+            adapter.selectAll();
+        });
+
+        // 4. Delete Button (Trash Icon)
+        binding.btnDeleteSelection.setOnClickListener(v -> {
+            confirmDeletion();
+        });
+    }
+
+    private void showSelectionToolbar(int count) {
+        binding.cardSelectionToolbar.setVisibility(View.VISIBLE);
+        binding.textSelectionCount.setText(count + " Selected");
+    }
+
+    private void hideSelectionToolbar() {
+        binding.cardSelectionToolbar.setVisibility(View.GONE);
+    }
+
+    private void confirmDeletion() {
+        int count = adapter.getSelectedIds().size();
+        new AlertDialog.Builder(getContext())
+                .setTitle("Delete Photos?")
+                .setMessage("Are you sure you want to delete " + count + " photo(s)?")
+                .setPositiveButton("Delete", (dialog, which) -> deleteSelectedPhotos())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void deleteSelectedPhotos() {
+        List<Long> idsToDelete = adapter.getSelectedIds();
+        adapter.clearSelection(); 
+        hideSelectionToolbar();
+
+        databaseExecutor.execute(() -> {
+            AppDatabase db = AppDatabase.getDatabase(getContext());
+            PhotoDao dao = db.photoDao();
+
+            for (Long id : idsToDelete) {
+                Photo photo = dao.getPhotoById(id);
+                if (photo != null) {
+                    // 1. Cancel Alarm
+                    Scheduler.cancelPhotoSend(getContext(), photo.getId());
+
+                    // 2. Delete Physical File
+                    try {
+                        File file = new File(photo.getFilePath());
+                        if (file.exists()) {
+                            file.delete();
+                        }
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+
+            // 3. Delete from DB
+            dao.deletePhotos(idsToDelete);
+
+            // 4. Reload
+            new Handler(Looper.getMainLooper()).post(() -> {
+                Toast.makeText(getContext(), "Photos Deleted", Toast.LENGTH_SHORT).show();
+                loadPhotos();
+            });
+        });
     }
 
     @Override
     public void onResume() {
         super.onResume();
-        // When the screen becomes visible (e.g., coming back from Camera), reload the photos.
+        // Clear any previous selection when returning to this screen
+        if (adapter != null) {
+            adapter.clearSelection();
+            hideSelectionToolbar();
+        }
         loadPhotos();
     }
 
     private void loadPhotos() {
-        // Show a loading indicator
         binding.progressBarGallery.setVisibility(View.VISIBLE);
         binding.textNoPhotos.setVisibility(View.GONE);
 
-        // Execute database query in background thread
-        databaseExecutor.execute(new Runnable() {
-            @Override
-            public void run() {
-                AppDatabase db = AppDatabase.getDatabase(getContext());
-                PhotoDao dao = db.photoDao();
-                
-                // Get all photos, ordered by capture time (newest first)
-                final List<Photo> loadedPhotos = dao.getAllPhotos();
+        databaseExecutor.execute(() -> {
+            AppDatabase db = AppDatabase.getDatabase(getContext());
+            PhotoDao dao = db.photoDao();
+            
+            final List<Photo> loadedPhotos = dao.getAllPhotos();
 
-                // Update UI on Main Thread
-                new Handler(Looper.getMainLooper()).post(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (binding == null) return; // Safety check if fragment was destroyed
+            new Handler(Looper.getMainLooper()).post(() -> {
+                if (binding == null) return;
 
-                        binding.progressBarGallery.setVisibility(View.GONE);
+                binding.progressBarGallery.setVisibility(View.GONE);
 
-                        if (loadedPhotos != null && !loadedPhotos.isEmpty()) {
-                            // Update the list and notify adapter
-                            photoList.clear();
-                            photoList.addAll(loadedPhotos);
-                            adapter.notifyDataSetChanged();
-                            
-                            binding.recyclerViewGallery.setVisibility(View.VISIBLE);
-                            binding.textNoPhotos.setVisibility(View.GONE);
-                        } else {
-                            // Show "No Photos" state
-                            binding.recyclerViewGallery.setVisibility(View.GONE);
-                            binding.textNoPhotos.setVisibility(View.VISIBLE);
-                        }
-                    }
-                });
-            }
+                if (loadedPhotos != null && !loadedPhotos.isEmpty()) {
+                    photoList.clear();
+                    photoList.addAll(loadedPhotos);
+                    adapter.notifyDataSetChanged();
+                    
+                    binding.recyclerViewGallery.setVisibility(View.VISIBLE);
+                    binding.textNoPhotos.setVisibility(View.GONE);
+                } else {
+                    binding.recyclerViewGallery.setVisibility(View.GONE);
+                    binding.textNoPhotos.setVisibility(View.VISIBLE);
+                }
+            });
         });
     }
 
     @Override
     public void onDestroyView() {
         super.onDestroyView();
-        binding = null; // Important to prevent memory leaks
+        binding = null; 
         if (databaseExecutor != null) {
             databaseExecutor.shutdown();
         }

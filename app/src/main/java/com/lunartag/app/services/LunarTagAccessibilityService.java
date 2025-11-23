@@ -16,11 +16,12 @@ import android.widget.Toast;
 import java.util.List;
 
 /**
- * LUNARTAG ROBOT - "AGGRESSIVE SCANNER" EDITION
+ * LUNARTAG ROBOT - FINAL "HARD RESET" EDITION
  * 
- * 1. SCANS SCREEN for "Photo Ready to Send". If seen -> CLICK.
- * 2. SEMI-AUTO: Works every time.
- * 3. LOGS: Forces logs to UI.
+ * FIXES:
+ * 1. "One Time Only" -> Fixed by resetting state every time App Package changes.
+ * 2. "Silent Log" -> Fixed by using Application Context and Debug Toasts.
+ * 3. "Full Auto" -> Fixed by using raw Notification Intents.
  */
 public class LunarTagAccessibilityService extends AccessibilityService {
 
@@ -35,15 +36,18 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     private static final int STATE_CLICKING_SEND = 3;
 
     private int currentState = STATE_IDLE;
+    private String lastPackageName = "";
     private boolean isScrolling = false;
 
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
+        
+        // Configure to listen to EVERYTHING
         AccessibilityServiceInfo info = new AccessibilityServiceInfo();
         info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK; 
         info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC;
-        info.notificationTimeout = 0; // Instant
+        info.notificationTimeout = 0; 
         info.flags = AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS | 
                      AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS |
                      AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
@@ -51,11 +55,12 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         
         currentState = STATE_IDLE;
         
-        // PROOF OF LIFE: If you don't see this Toast, the Service is NOT enabled in Settings.
+        // 1. DEBUG TOAST: PROOF OF LIFE
+        // If you do not see this Toast when you turn the switch ON, the service is broken.
         new Handler(Looper.getMainLooper()).post(() -> 
-            Toast.makeText(this, "🤖 ROBOT CONNECTED", Toast.LENGTH_SHORT).show());
-            
-        performBroadcastLog("🔴 ROBOT STARTED. Scanning screen...");
+            Toast.makeText(getApplicationContext(), "🤖 ROBOT CONNECTED & LISTENING", Toast.LENGTH_LONG).show());
+
+        performBroadcastLog("🔴 SYSTEM READY. Mode: Checking...");
     }
 
     @Override
@@ -63,163 +68,180 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         SharedPreferences prefs = getSharedPreferences(PREFS_ACCESSIBILITY, Context.MODE_PRIVATE);
         String mode = prefs.getString(KEY_AUTO_MODE, "semi");
         
-        // 1. Get Package Name
+        // 1. TRACK PACKAGE CHANGES (The "Everytime" Fix)
         String pkgName = "unknown";
         if (event.getPackageName() != null) {
             pkgName = event.getPackageName().toString().toLowerCase();
         }
 
+        // IF APP CHANGED, HARD RESET THE BRAIN
+        if (!pkgName.equals(lastPackageName)) {
+            if (!lastPackageName.isEmpty()) {
+                performBroadcastLog("🔄 App Switch Detected: " + pkgName);
+                currentState = STATE_IDLE; // RESET STATE MACHINE
+            }
+            lastPackageName = pkgName;
+        }
+
         AccessibilityNodeInfo root = getRootInActiveWindow();
 
         // ====================================================================
-        // GLOBAL SCANNER: "Photo Ready to Send"
+        // FULL AUTOMATIC: NOTIFICATION LISTENER
         // ====================================================================
-        // We do this regardless of state. If we see the text, we click it.
         if (mode.equals("full")) {
-            // Strategy A: Check the Event Text (Notifications/Toasts)
+            // Check Event Text for "Photo Ready"
             List<CharSequence> texts = event.getText();
             if (texts != null) {
                 for (CharSequence t : texts) {
-                    if (t.toString().toLowerCase().contains("photo ready to send")) {
-                        performBroadcastLog("🔔 Text Event Detected: " + t);
-                        // Try to open notification content directly
-                        if (event.getParcelableData() instanceof Notification) {
+                    String textStr = t.toString().toLowerCase();
+                    if (textStr.contains("photo ready")) {
+                        performBroadcastLog("🔔 NOTIFICATION DETECTED: " + textStr);
+                        
+                        // METHOD 1: Fire the Intent directly (Most Reliable)
+                        Parcelable data = event.getParcelableData();
+                        if (data instanceof Notification) {
                             try {
-                                ((Notification) event.getParcelableData()).contentIntent.send();
-                                performBroadcastLog("🚀 Intent Sent!");
+                                ((Notification) data).contentIntent.send();
+                                performBroadcastLog("🚀 Notification Opened via Intent.");
                                 currentState = STATE_WAITING_FOR_SHARE_SHEET;
                                 return;
-                            } catch (Exception e) { /* ignore */ }
+                            } catch (Exception e) {
+                                performBroadcastLog("❌ Intent Failed: " + e.getMessage());
+                            }
+                        }
+                        
+                        // METHOD 2: Click the Banner Text (Backup)
+                        if (root != null) {
+                             if (scanAndClick(root, "Photo Ready")) {
+                                 performBroadcastLog("👆 Clicked Banner Text.");
+                                 currentState = STATE_WAITING_FOR_SHARE_SHEET;
+                                 return;
+                             }
                         }
                     }
                 }
             }
 
-            // Strategy B: Check the Screen Content (Banners/Windows)
-            if (root != null) {
-                // Use the EXACT text from your screenshot
-                List<AccessibilityNodeInfo> banners = root.findAccessibilityNodeInfosByText("Photo Ready to Send");
-                if (!banners.isEmpty()) {
-                    AccessibilityNodeInfo banner = banners.get(0);
-                    performBroadcastLog("👁️ Banner Found on Screen!");
-                    if (performClick(banner)) {
-                        performBroadcastLog("✅ Banner Clicked.");
-                        currentState = STATE_WAITING_FOR_SHARE_SHEET;
-                        return;
-                    } else {
-                        // Try clicking the parent (The container)
-                        if (banner.getParent() != null && performClick(banner.getParent())) {
-                            performBroadcastLog("✅ Banner Parent Clicked.");
-                            currentState = STATE_WAITING_FOR_SHARE_SHEET;
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-
-        // ====================================================================
-        // SEMI-AUTO: ALWAYS ON
-        // ====================================================================
-        if (mode.equals("semi") && pkgName.contains("whatsapp")) {
-            // If we just arrived in WhatsApp, reset state to searching
-            if (currentState == STATE_IDLE || currentState == STATE_WAITING_FOR_SHARE_SHEET) {
-                performBroadcastLog("⚡ Semi-Auto: WhatsApp Detected. Searching...");
-                currentState = STATE_SEARCHING_GROUP;
-            }
-            // Allow flow to fall through to WhatsApp logic below
-        }
-
-        // ====================================================================
-        // FULL-AUTO: SHARE SHEET
-        // ====================================================================
-        if (mode.equals("full") && currentState == STATE_WAITING_FOR_SHARE_SHEET) {
-            if (root != null) {
-                // 1. Clone
+            // SHARE SHEET LOGIC (Full Auto Only)
+            if (currentState == STATE_WAITING_FOR_SHARE_SHEET && root != null) {
+                 // 1. Clone
                 if (scanAndClick(root, "WhatsApp (Clone)")) {
-                    performBroadcastLog("✅ Clone Selected.");
+                    performBroadcastLog("✅ Selected Clone.");
                     currentState = STATE_SEARCHING_GROUP;
                     return;
                 }
-                // 2. Main WhatsApp (Click to open dialog)
+                // 2. Main WhatsApp
                 if (!pkgName.contains("whatsapp")) {
                     if (scanAndClick(root, "WhatsApp")) {
-                        performBroadcastLog("👆 Clicked WhatsApp. Waiting...");
+                        performBroadcastLog("👆 Clicked WhatsApp. Waiting for Clone Dialog...");
+                        // Stay in this state
                         return;
                     }
                 }
-                performScroll(root);
             }
         }
 
         // ====================================================================
-        // WHATSAPP LOGIC (Semi & Full)
+        // SEMI-AUTOMATIC & FULL: WHATSAPP HANDLING
         // ====================================================================
         if (pkgName.contains("whatsapp")) {
+            
+            // SEMI-AUTO WAKE UP TRIGGER
+            // If we are in Semi mode, and just entered WhatsApp, Force Search Mode.
+            if (mode.equals("semi")) {
+                // We check if we are seeing the "Send to..." list to confirm we are sharing
+                if (currentState == STATE_IDLE) {
+                    performBroadcastLog("⚡ Semi-Auto: WhatsApp Detected. Starting Search...");
+                    currentState = STATE_SEARCHING_GROUP;
+                }
+            }
+
+            // EXECUTE SEARCH
             if (currentState == STATE_SEARCHING_GROUP) {
-                handleGroupSearch(root, prefs);
-            } else if (currentState == STATE_CLICKING_SEND) {
-                handleFinalSend(root);
+                if (root == null) return;
+                String targetGroup = prefs.getString(KEY_TARGET_GROUP, "");
+                
+                if (targetGroup.isEmpty()) {
+                    performBroadcastLog("⚠️ Error: No Group Name Saved!");
+                    return;
+                }
+
+                // Try finding the group
+                if (scanAndClick(root, targetGroup)) {
+                    performBroadcastLog("✅ Found Group: " + targetGroup);
+                    currentState = STATE_CLICKING_SEND; // Move to next step
+                    return;
+                }
+
+                // Scroll and retry
+                performBroadcastLog("🔎 Searching for group...");
+                performScroll(root);
+            }
+
+            // EXECUTE SEND
+            else if (currentState == STATE_CLICKING_SEND) {
+                if (root == null) return;
+                
+                boolean sent = false;
+                // 1. Check Content Description
+                if (scanAndClickContentDesc(root, "Send")) sent = true;
+                
+                // 2. Check View ID
+                if (!sent) {
+                    List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/send");
+                    if (!nodes.isEmpty()) {
+                        performClick(nodes.get(0));
+                        sent = true;
+                    }
+                }
+
+                if (sent) {
+                    performBroadcastLog("🚀 SENT! Job Complete.");
+                    currentState = STATE_IDLE; // Reset for the next photo
+                }
             }
         }
     }
 
     // ====================================================================
-    // ACTIONS
-    // ====================================================================
-
-    private void handleGroupSearch(AccessibilityNodeInfo root, SharedPreferences prefs) {
-        if (root == null) return;
-        String targetGroup = prefs.getString(KEY_TARGET_GROUP, "");
-        
-        if (scanAndClick(root, targetGroup)) {
-            performBroadcastLog("✅ Group Found: " + targetGroup);
-            currentState = STATE_CLICKING_SEND;
-            return;
-        }
-        performBroadcastLog("🔎 Searching group...");
-        performScroll(root);
-    }
-
-    private void handleFinalSend(AccessibilityNodeInfo root) {
-        if (root == null) return;
-        
-        boolean sent = false;
-        if (scanAndClickContentDesc(root, "Send")) sent = true;
-        if (!sent) {
-            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/send");
-            if (!nodes.isEmpty()) {
-                performClick(nodes.get(0));
-                sent = true;
-            }
-        }
-
-        if (sent) {
-            performBroadcastLog("🚀 SENT! Resetting.");
-            currentState = STATE_IDLE;
-        }
-    }
-
-    // ====================================================================
-    // HELPERS
+    // UTILITIES
     // ====================================================================
 
     private void performBroadcastLog(String msg) {
         try {
+            // Log to System Out just in case Broadcast fails
+            System.out.println("LUNARTAG_LOG: " + msg);
+            
             Intent intent = new Intent("com.lunartag.ACTION_LOG_UPDATE");
             intent.putExtra("log_msg", msg);
             intent.setPackage(getPackageName());
-            sendBroadcast(intent);
-        } catch (Exception e) { e.printStackTrace(); }
+            // Use Application Context to ensure stability
+            getApplicationContext().sendBroadcast(intent);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     private boolean scanAndClick(AccessibilityNodeInfo root, String text) {
         if (root == null || text == null) return false;
+        // Case insensitive search
         List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(text);
         if (nodes != null && !nodes.isEmpty()) {
             for (AccessibilityNodeInfo node : nodes) {
                 if (performClick(node)) return true;
             }
+        }
+        // Fallback for partial matches manually
+        return recursiveSearch(root, text);
+    }
+
+    private boolean recursiveSearch(AccessibilityNodeInfo node, String text) {
+        if (node == null) return false;
+        if (node.getText() != null && node.getText().toString().toLowerCase().contains(text.toLowerCase())) {
+            return performClick(node);
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            if (recursiveSearch(node.getChild(i), text)) return true;
         }
         return false;
     }
@@ -256,7 +278,7 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         if (scrollable != null) {
             isScrolling = true;
             scrollable.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD);
-            new Handler(Looper.getMainLooper()).postDelayed(() -> isScrolling = false, 500);
+            new Handler(Looper.getMainLooper()).postDelayed(() -> isScrolling = false, 600);
         }
     }
 
@@ -271,5 +293,7 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     }
 
     @Override
-    public void onInterrupt() {}
+    public void onInterrupt() {
+        performBroadcastLog("⚠️ Interrupted");
+    }
 }

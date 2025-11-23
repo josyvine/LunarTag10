@@ -1,6 +1,6 @@
 package com.lunartag.app.services;
 
-import  android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.content.Context;
 import android.content.Intent;
@@ -14,14 +14,6 @@ import android.widget.Toast;
 
 import java.util.List;
 
-/**
- * LUNARTAG ROBOT - AI ENHANCED EDITION
- * 
- * FEATURES:
- * 1. AI VISION: Uses AiClicker to visually find "Clone" and "Group Name".
- * 2. SOURCE TRACKING: Prevents interference with personal WhatsApp.
- * 3. HYBRID SCROLLING: Scrolls if AI cannot see the target.
- */
 public class LunarTagAccessibilityService extends AccessibilityService {
 
     private static final String PREFS_ACCESSIBILITY = "LunarTagAccessPrefs";
@@ -60,7 +52,7 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         aiClicker = new AiClicker(this);
 
         currentState = STATE_IDLE;
-        performBroadcastLog("👁️ AI ROBOT READY. WAITING FOR COMMAND...");
+        performBroadcastLog("🤖 ROBOT ONLINE. AI READY.");
     }
 
     @Override
@@ -148,57 +140,47 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                  }
             }
 
-            // B. SEARCH GROUP (AI or Standard)
+            // B. SEARCH GROUP (Standard - You confirmed this works)
             if (currentState == STATE_SEARCHING_GROUP) {
                 String targetGroup = prefs.getString(KEY_TARGET_GROUP, "");
                 if (targetGroup.isEmpty()) return;
 
-                // TRY STANDARD FIRST (Faster)
                 if (scanAndClick(root, targetGroup)) {
-                    performBroadcastLog("✅ Found Group (Node Match): " + targetGroup);
+                    performBroadcastLog("✅ Found Group: " + targetGroup);
                     currentState = STATE_CLICKING_SEND;
                     return;
                 }
 
-                // IF STANDARD FAILS, TRY AI (Smarter)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    aiClicker.scanAndClickVisual(targetGroup, (success) -> {
-                        if (success) {
-                            performBroadcastLog("✅ AI: Visual Match for Group.");
-                            currentState = STATE_CLICKING_SEND;
-                        } else {
-                            if (!isScrolling) performScroll(root);
-                        }
-                    });
-                } else {
-                    // Old phone fallback
-                    if (!isScrolling) performScroll(root);
-                }
+                if (!isScrolling) performScroll(root);
             }
 
-            // C. CLICK SEND
+            // C. CLICK SEND (FIXED: Uses View IDs, NOT AI)
             else if (currentState == STATE_CLICKING_SEND) {
                 boolean sent = false;
+
+                // 1. Try Content Description (Standard)
                 if (scanAndClickContentDesc(root, "Send")) sent = true;
-                
+
+                // 2. Try Standard ID (Old WhatsApp)
                 if (!sent) {
-                    // Try View ID
                     List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/send");
-                    if (!nodes.isEmpty()) {
-                        performClick(nodes.get(0));
-                        sent = true;
+                    if (!nodes.isEmpty()) { 
+                        performClick(nodes.get(0)); 
+                        sent = true; 
                     }
                 }
 
-                // If Standard Send failed, Try AI Send
-                if (!sent && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                     aiClicker.scanAndClickVisual("Send", (success) -> {
-                         if (success) {
-                             performBroadcastLog("🚀 AI SENT!");
-                             currentState = STATE_IDLE;
-                         }
-                     });
-                } else if (sent) {
+                // 3. Try New ID (New WhatsApp 2024/2025)
+                // This is likely why it failed before. The ID changed.
+                if (!sent) {
+                    List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/conversation_send_arrow");
+                    if (!nodes.isEmpty()) { 
+                        performClick(nodes.get(0)); 
+                        sent = true; 
+                    }
+                }
+
+                if (sent) {
                     performBroadcastLog("🚀 SENT! Job Done.");
                     currentState = STATE_IDLE;
                 }
@@ -207,7 +189,7 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     }
 
     // ====================================================================
-    // STANDARD UTILITIES (FALLBACKS)
+    // STANDARD UTILITIES
     // ====================================================================
 
     private boolean scanAndClick(AccessibilityNodeInfo root, String text) {

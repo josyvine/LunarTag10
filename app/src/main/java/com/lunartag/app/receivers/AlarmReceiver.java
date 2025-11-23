@@ -27,7 +27,7 @@ import java.io.File;
 public class AlarmReceiver extends BroadcastReceiver {
 
     private static final String TAG = "AlarmReceiver";
-    
+
     // Keys to retrieve data from Scheduler
     public static final String EXTRA_FILE_PATH = "com.lunartag.app.EXTRA_FILE_PATH";
     // NEW: We receive the Photo ID to create unique notifications
@@ -41,13 +41,15 @@ public class AlarmReceiver extends BroadcastReceiver {
     private static final String PREFS_ACCESSIBILITY = "LunarTagAccessPrefs";
     private static final String KEY_TARGET_GROUP = "target_group_name";
     private static final String KEY_JOB_PENDING = "job_is_pending";
+    // NEW: Needed to check if we should skip notification
+    private static final String KEY_AUTO_MODE = "automation_mode";
 
     private static final String CHANNEL_ID = "SendServiceChannel"; 
 
     @Override
     public void onReceive(Context context, Intent intent) {
         Log.d(TAG, "Alarm Received! Waking up...");
-        
+
         String filePath = intent.getStringExtra(EXTRA_FILE_PATH);
         // Default to current time if ID is missing, ensuring uniqueness
         long photoId = intent.getLongExtra(EXTRA_PHOTO_ID, System.currentTimeMillis());
@@ -87,9 +89,44 @@ public class AlarmReceiver extends BroadcastReceiver {
         // 2. Arm the Accessibility Bridge (So the robot knows what to do)
         armAccessibilityService(context);
 
-        // 3. Create the Notification (The "Doorbell")
-        // We pass the unique photoId so notifications don't overwrite each other.
-        showNotification(context, imageUri, (int) photoId);
+        // --- NEW LOGIC: CHECK MODE SEPARATION ---
+        SharedPreferences accessPrefs = context.getSharedPreferences(PREFS_ACCESSIBILITY, Context.MODE_PRIVATE);
+        String mode = accessPrefs.getString(KEY_AUTO_MODE, "semi");
+
+        if ("full".equals(mode)) {
+            // 3A. FULL AUTOMATIC: DIRECT LAUNCH (ZERO CLICK)
+            // Opens WhatsApp Package directly, triggering the Clone/Original dialog instantly.
+            launchDirectlyForFullAuto(context, imageUri);
+        } else {
+            // 3B. SEMI AUTOMATIC: SHOW NOTIFICATION (ORIGINAL LOGIC)
+            // We pass the unique photoId so notifications don't overwrite each other.
+            showNotification(context, imageUri, (int) photoId);
+        }
+    }
+
+    /**
+     * FULL AUTO EXCLUSIVE: Launches WhatsApp directly without user interaction.
+     */
+    private void launchDirectlyForFullAuto(Context context, Uri imageUri) {
+        try {
+            Intent intent = new Intent(Intent.ACTION_SEND);
+            intent.setType("image/*");
+            intent.putExtra(Intent.EXTRA_STREAM, imageUri);
+            
+            // MAGIC FIX: Force the intent to only see WhatsApp.
+            // This causes Android to open the "Select App" dialog showing only Original and Clone.
+            intent.setPackage("com.whatsapp");
+            
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); // Required when starting activity from Receiver
+            
+            context.startActivity(intent);
+            Log.d(TAG, "Full Auto: Direct Launch Fired.");
+        } catch (Exception e) {
+            Log.e(TAG, "Full Auto Launch Failed: " + e.getMessage());
+            // Fallback: If direct launch fails, show notification
+            showNotification(context, imageUri, 999);
+        }
     }
 
     /**
@@ -122,11 +159,11 @@ public class AlarmReceiver extends BroadcastReceiver {
         shareIntent.setType("image/*");
         shareIntent.putExtra(Intent.EXTRA_STREAM, imageUri);
         shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        
+
         // B. The Chooser Intent (Forces the "Select App" menu)
         // This title "Select WhatsApp..." helps the Robot know where it is.
         Intent chooserIntent = Intent.createChooser(shareIntent, "Select WhatsApp to Send...");
-        
+
         // C. The PendingIntent
         // CRITICAL: We use notificationId as request code to ensure unique PendingIntents
         PendingIntent pendingIntent = PendingIntent.getActivity(
@@ -165,7 +202,7 @@ public class AlarmReceiver extends BroadcastReceiver {
             channel.setDescription("Notifications for scheduled photo uploads");
             channel.enableVibration(true);
             channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
-            
+
             NotificationManager manager = context.getSystemService(NotificationManager.class);
             if (manager != null) {
                 manager.createNotificationChannel(channel);

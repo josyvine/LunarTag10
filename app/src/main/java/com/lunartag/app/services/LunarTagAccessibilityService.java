@@ -22,8 +22,10 @@ import java.util.List;
  * 1. "One Time Only" -> Fixed by resetting state every time App Package changes.
  * 2. "Silent Log" -> Fixed by using Application Context and Debug Toasts.
  * 3. "Full Auto" -> Fixed by using raw Notification Intents.
- * 4. "Group Not Clicking" -> Fixed by checking contentDescription in scanAndClick (2025 WhatsApp).
- * 5. "Clone Not Clicking" -> Fixed by searching for "(clone)" label in share sheet.
+ * 4. FIXED: "One Time Only" in Semi -> Added window event reset + retry count.
+ * 5. FIXED: Group not clicking every time -> ContentDesc search + scroll retry.
+ * 6. FIXED: Clone not clicked -> Label match for "(clone)".
+ * 7. FIXED: Send not found/enabled -> Enabled check + text fallback.
  */
 public class LunarTagAccessibilityService extends AccessibilityService {
 
@@ -40,6 +42,7 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     private int currentState = STATE_IDLE;
     private String lastPackageName = "";
     private boolean isScrolling = false;
+    private int scrollRetries = 0; // FIXED: Track retries to avoid infinite scroll
 
     @Override
     protected void onServiceConnected() {
@@ -56,6 +59,7 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         setServiceInfo(info);
 
         currentState = STATE_IDLE;
+        scrollRetries = 0; // FIXED: Reset retries on start
 
         // 1. DEBUG TOAST: PROOF OF LIFE
         // If you do not see this Toast when you turn the switch ON, the service is broken.
@@ -83,9 +87,17 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                 // Don't reset if we are just transitioning to share sheet or system resolver
                 if (!pkgName.equals("android") && !pkgName.contains("launcher") && !pkgName.contains("resolver")) {
                      currentState = STATE_IDLE; 
+                     scrollRetries = 0; // FIXED: Reset retries on package change
                 }
             }
             lastPackageName = pkgName;
+        }
+
+        // FIXED: Reset state on window content change (for WhatsApp internal events)
+        if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED && currentState != STATE_IDLE) {
+            performBroadcastLog("🔄 Window changed → Resetting state for retry");
+            currentState = STATE_IDLE;
+            scrollRetries = 0;
         }
 
         AccessibilityNodeInfo root = getRootInActiveWindow();
@@ -103,7 +115,8 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                  List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText("WhatsApp");
 
                  if (nodes != null && !nodes.isEmpty()) {
-                     // FIXED CLONE DETECTION LOGIC: Look for "(clone)" label instead of index
+                     // FIXED CLONE DETECTION: Search for "(clone)" label instead of index
+                     boolean clickedClone = false;
                      for (AccessibilityNodeInfo node : nodes) {
                          String label = "";
                          if (node.getText() != null) label = node.getText().toString();
@@ -111,13 +124,20 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                          if (label.toLowerCase().contains("(clone)")) {
                              performBroadcastLog("✅ Full Auto: Found WhatsApp (clone). Clicking...");
                              performClick(node);
-                             currentState = STATE_SEARCHING_GROUP;
-                             return;
+                             clickedClone = true;
+                             break;
                          }
                      }
-                     // Fallback: Click first if no clone label found
-                     performBroadcastLog("✅ Full Auto: No clone label, clicking first WhatsApp...");
-                     performClick(nodes.get(0));
+                     if (!clickedClone) {
+                         // Fallback to old logic if no "(clone)" found
+                         if (nodes.size() >= 2) {
+                             performBroadcastLog("✅ Full Auto: 2 WhatsApps Found. Clicking Index 1 (Clone)...");
+                             performClick(nodes.get(1)); // Click the second one
+                         } else if (nodes.size() == 1) {
+                             performBroadcastLog("✅ Full Auto: 1 WhatsApp Found. Clicking Index 0...");
+                             performClick(nodes.get(0));
+                         }
+                     }
                      currentState = STATE_SEARCHING_GROUP;
                      return;
                  }
@@ -141,7 +161,10 @@ public class LunarTagAccessibilityService extends AccessibilityService {
 
             // EXECUTE SEARCH
             if (currentState == STATE_SEARCHING_GROUP) {
-                if (root == null) return;
+                if (root == null) {
+                    performBroadcastLog("⚠️ Root null in WhatsApp - retrying...");
+                    return;
+                }
                 String targetGroup = prefs.getString(KEY_TARGET_GROUP, "");
 
                 if (targetGroup.isEmpty()) {
@@ -149,18 +172,27 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                     return;
                 }
 
-                performBroadcastLog("🔍 DEBUG: Searching for group '" + targetGroup + "' in root with " + root.getChildCount() + " children.");
+                // FIXED: Debug log for root
+                performBroadcastLog("🔍 DEBUG: Searching for '" + targetGroup + "' in root with " + root.getChildCount() + " children.");
 
                 // Try finding the group
                 if (scanAndClick(root, targetGroup)) {
                     performBroadcastLog("✅ Found Group: " + targetGroup);
                     currentState = STATE_CLICKING_SEND; // Move to next step
+                    scrollRetries = 0; // FIXED: Reset retries on success
                     return;
                 }
 
-                // Scroll and retry
-                performBroadcastLog("🔎 Searching for group...");
-                performScroll(root);
+                // FIXED: Scroll and retry with limit (avoid infinite)
+                if (scrollRetries < 5) { // Max 5 scrolls
+                    performBroadcastLog("🔎 Scroll retry " + (scrollRetries + 1) + "/5 for group...");
+                    performScroll(root);
+                    scrollRetries++;
+                } else {
+                    performBroadcastLog("⚠️ Max scrolls reached - resetting for next attempt");
+                    currentState = STATE_IDLE;
+                    scrollRetries = 0;
+                }
             }
 
             // EXECUTE SEND
@@ -174,15 +206,23 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                 // 2. Check View ID
                 if (!sent) {
                     List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/send");
-                    if (!nodes.isEmpty() && nodes.get(0).isEnabled()) {
+                    if (!nodes.isEmpty() && nodes.get(0).isEnabled()) { // FIXED: Check enabled
                         performClick(nodes.get(0));
                         sent = true;
+                    } else {
+                        // FIXED: Fallback search for "Send" text if ID fails
+                        List<AccessibilityNodeInfo> fallbackNodes = root.findAccessibilityNodeInfosByText("Send");
+                        if (!fallbackNodes.isEmpty()) {
+                            performClick(fallbackNodes.get(0));
+                            sent = true;
+                        }
                     }
                 }
 
                 if (sent) {
                     performBroadcastLog("🚀 SENT! Job Complete.");
                     currentState = STATE_IDLE; // Reset for the next photo
+                    scrollRetries = 0; // FIXED: Reset retries
                 } else {
                     performBroadcastLog("⚠️ DEBUG: Send button not found or not enabled.");
                 }
@@ -224,12 +264,13 @@ public class LunarTagAccessibilityService extends AccessibilityService {
 
     private boolean recursiveSearch(AccessibilityNodeInfo node, String text) {
         if (node == null) return false;
-        // FIXED: Check BOTH text AND contentDescription (2025 WhatsApp uses contentDescription for groups)
+        // FIXED: Check BOTH text AND contentDescription (2025 WhatsApp groups use contentDesc)
         if (node.getText() != null && node.getText().toString().toLowerCase().contains(text.toLowerCase())) {
+            performBroadcastLog("✅ DEBUG: Group found in text → Clicking.");
             return performClick(node);
         }
         if (node.getContentDescription() != null && node.getContentDescription().toString().toLowerCase().contains(text.toLowerCase())) {
-            performBroadcastLog("✅ DEBUG: Found group in contentDescription → Clicking.");
+            performBroadcastLog("✅ DEBUG: Group found in contentDescription → Clicking.");
             return performClick(node);
         }
         for (int i = 0; i < node.getChildCount(); i++) {

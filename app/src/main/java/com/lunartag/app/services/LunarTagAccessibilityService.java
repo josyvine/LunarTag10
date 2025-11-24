@@ -19,8 +19,6 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     private static final String KEY_AUTO_MODE = "automation_mode"; 
     private static final String KEY_TARGET_GROUP = "target_group_name";
     private static final String KEY_TARGET_APP_LABEL = "target_app_label";
-    // NEW: Logic to bridge the Alarm to the Robot
-    private static final String KEY_JOB_PENDING = "job_is_pending";
 
     // STATES
     private static final int STATE_IDLE = 0;
@@ -31,8 +29,6 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     private int currentState = STATE_IDLE;
     private boolean isScrolling = false;
     private boolean isClickingPending = false; 
-    
-    private String previousAppPackage = ""; 
 
     @Override
     protected void onServiceConnected() {
@@ -47,7 +43,6 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                      AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
         setServiceInfo(info);
         
-        // Start Overlay for Red Light
         try {
             Intent intent = new Intent(this, OverlayService.class);
             startService(intent);
@@ -56,76 +51,64 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         }
 
         currentState = STATE_IDLE;
-        performBroadcastLog("🔴 ROBOT ONLINE. WAITING FOR ALARM...");
+        performBroadcastLog("🔴 ROBOT ONLINE. SMART CONTEXT ACTIVE.");
     }
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null || event.getPackageName() == null) return;
+        
         String pkgName = event.getPackageName().toString().toLowerCase();
-
         if (pkgName.contains("inputmethod") || pkgName.contains("systemui")) return;
+
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return;
 
         SharedPreferences prefs = getSharedPreferences(PREFS_ACCESSIBILITY, Context.MODE_PRIVATE);
         String mode = prefs.getString(KEY_AUTO_MODE, "semi");
-        boolean isJobPending = prefs.getBoolean(KEY_JOB_PENDING, false); // Check if Alarm fired recently
-
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-
-        boolean isWhatsApp = pkgName.contains("whatsapp");
-        boolean isMyApp = pkgName.contains("lunartag");
-        
-        // BROADENED SHARE SHEET DETECTION
-        // We now include "android", "ui", "resolver", "launcher", and "packageinstaller"
-        // This covers Samsung, Pixel, Oppo, Vivo share sheets.
-        boolean isLikelyShareSheet = pkgName.equals("android") || pkgName.contains("ui") || 
-                                     pkgName.contains("resolver") || pkgName.contains("chooser") ||
-                                     pkgName.contains("android.app");
-
-        // ====================================================================
-        // 1. PERSONAL SAFETY & TERRITORY LOCK
-        // ====================================================================
-        // FIX: If a Job is Pending (Full Auto), we IGNORE the "Foreign App" check.
-        // We look everywhere until we find the target app.
-        if (!isJobPending) {
-            if (!isWhatsApp && !isLikelyShareSheet && !isMyApp) {
-                previousAppPackage = pkgName;
-                if (currentState != STATE_IDLE) {
-                    performBroadcastLog("🛑 Switched App. Robot Stopped.");
-                    currentState = STATE_IDLE;
-                    if (OverlayService.getInstance() != null) OverlayService.getInstance().hideMarker();
-                }
-                return; 
-            }
-        }
+        String targetAppName = prefs.getString(KEY_TARGET_APP_LABEL, "WhatsApp(Clone)");
+        String targetGroup = prefs.getString(KEY_TARGET_GROUP, "");
 
         if (isClickingPending) return;
 
         // ====================================================================
-        // 2. FULL AUTOMATIC: SHARE SHEET (ANY PACKAGE)
+        // 1. CONTEXT VALIDATION (THE SMART LOCK)
         // ====================================================================
-        if (mode.equals("full")) {
-            
-            // If Alarm fired (Job Pending), immediately start searching
-            if (isJobPending) {
-                currentState = STATE_SEARCHING_SHARE_SHEET;
+        // We scan the screen for keywords that prove we are in a "Share" or "Send" flow.
+        // If these words are missing, we assume we are on the Home Screen and DO NOTHING.
+        
+        boolean isShareSheet = hasText(root, "Share") || hasText(root, "Apps") || 
+                               hasText(root, "Complete action") || hasText(root, "Nearby");
+                               
+        boolean isWhatsApp = pkgName.contains("whatsapp") || 
+                             hasText(root, "Send to") || hasText(root, "Recent chats");
+
+        boolean isMyApp = pkgName.contains("lunartag");
+
+        // SAFETY CHECK: If it's not an App we know, and it doesn't look like a Share Sheet...
+        if (!isShareSheet && !isWhatsApp && !isMyApp) {
+            if (currentState != STATE_IDLE) {
+                currentState = STATE_IDLE;
+                if (OverlayService.getInstance() != null) OverlayService.getInstance().hideMarker();
             }
+            return; // STOP. Do not click random icons on Home Screen.
+        }
+
+        // ====================================================================
+        // 2. FULL AUTO: SHARE SHEET LOGIC
+        // ====================================================================
+        if (mode.equals("full") && isShareSheet) {
+            
+            if (currentState == STATE_IDLE) currentState = STATE_SEARCHING_SHARE_SHEET;
 
             if (currentState == STATE_SEARCHING_SHARE_SHEET) {
-                String targetAppName = prefs.getString(KEY_TARGET_APP_LABEL, "WhatsApp(Clone)");
-                
-                // Try to find the app visual
+                // Try to find target (e.g. "WhatsApp(Clone)")
                 if (findMarkerAndClick(root, targetAppName, true)) {
-                    performBroadcastLog("✅ Found '" + targetAppName + "'. Clicking...");
-                    
-                    // JOB DONE FOR STEP 1. Clear Pending Flag.
-                    prefs.edit().putBoolean(KEY_JOB_PENDING, false).apply();
+                    performBroadcastLog("✅ Share Sheet: Found '" + targetAppName + "'. Clicking...");
                     currentState = STATE_SEARCHING_GROUP;
                 } else {
-                    // Only scroll if we are strictly in a system view, to avoid scrolling random apps
-                    if (isLikelyShareSheet && !isScrolling) {
-                        performScroll(root);
-                    }
+                    // Only scroll if we are definitely in a list
+                    if (!isScrolling) performScroll(root);
                 }
             }
         }
@@ -135,24 +118,16 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         // ====================================================================
         if (isWhatsApp) {
             
-            if (root == null) return;
-
-            // A. TRIGGER: "SEND TO..."
-            // If we see this, we know we are in the sharing screen
-            List<AccessibilityNodeInfo> headers = root.findAccessibilityNodeInfosByText("Send to");
-            if (headers != null && !headers.isEmpty()) {
-                 // Force state if we just arrived here
+            // A. TRIGGER
+            if (hasText(root, "Send to")) {
                  if (currentState == STATE_IDLE || currentState == STATE_SEARCHING_SHARE_SHEET) {
-                     performBroadcastLog("⚡ WhatsApp Opened. Searching Group...");
+                     performBroadcastLog("⚡ WhatsApp Detected. Searching Group...");
                      currentState = STATE_SEARCHING_GROUP;
-                     // Ensure pending job is cleared so we don't search the share sheet inside WhatsApp
-                     prefs.edit().putBoolean(KEY_JOB_PENDING, false).apply();
                  }
             }
 
             // B. SEARCH GROUP
             if (currentState == STATE_SEARCHING_GROUP) {
-                String targetGroup = prefs.getString(KEY_TARGET_GROUP, "");
                 if (targetGroup.isEmpty()) return;
 
                 if (findMarkerAndClick(root, targetGroup, true)) {
@@ -167,12 +142,15 @@ public class LunarTagAccessibilityService extends AccessibilityService {
             // C. CLICK SEND
             else if (currentState == STATE_CLICKING_SEND) {
                 boolean found = false;
+                // Try visual IDs
                 if (findMarkerAndClickID(root, "com.whatsapp:id/conversation_send_arrow")) found = true;
                 if (!found && findMarkerAndClickID(root, "com.whatsapp:id/send")) found = true;
+                
+                // Try Text (Fallback)
                 if (!found && findMarkerAndClick(root, "Send", false)) found = true;
 
                 if (found) {
-                    performBroadcastLog("🚀 SEND FOUND! Job Complete.");
+                    performBroadcastLog("🚀 SENT! Job Done.");
                     currentState = STATE_IDLE;
                 }
             }
@@ -183,10 +161,15 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     // UTILITIES
     // ====================================================================
 
+    private boolean hasText(AccessibilityNodeInfo root, String text) {
+        if (root == null || text == null) return false;
+        List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(text);
+        return nodes != null && !nodes.isEmpty();
+    }
+
     private boolean findMarkerAndClick(AccessibilityNodeInfo root, String text, boolean isTextSearch) {
         if (root == null || text == null || text.isEmpty()) return false;
         
-        // 1. Direct Text Search
         List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(text);
         if (nodes != null && !nodes.isEmpty()) {
             for (AccessibilityNodeInfo node : nodes) {
@@ -196,7 +179,6 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                 }
             }
         }
-        // 2. Recursive Search (Matches "WhatsApp(Clone)" even if spaced differently)
         return recursiveSearchAndClick(root, text);
     }
 
@@ -214,7 +196,6 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         if (node == null) return false;
         boolean match = false;
         
-        // Standardize text for comparison (Remove spaces, lowercase)
         String cleanTarget = text.toLowerCase().replace(" ", "");
         
         if (node.getText() != null) {
@@ -228,14 +209,12 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         }
         
         if (match) {
-            // Climb up to find the clickable parent (Important for Grid Icons)
-            AccessibilityNodeInfo clickableNode = node;
-            while (clickableNode != null && !clickableNode.isClickable()) {
-                clickableNode = clickableNode.getParent();
+            AccessibilityNodeInfo clickable = node;
+            while (clickable != null && !clickable.isClickable()) {
+                clickable = clickable.getParent();
             }
-            
-            if (clickableNode != null) {
-                executeVisualClick(clickableNode);
+            if (clickable != null) {
+                executeVisualClick(clickable);
                 return true;
             }
         }

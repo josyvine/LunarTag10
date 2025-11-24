@@ -52,16 +52,16 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         }
 
         currentState = STATE_IDLE;
-        performBroadcastLog("🔴 ROBOT ONLINE. TARGET LOCK ACTIVE.");
+        performBroadcastLog("🔴 ROBOT ONLINE. AGGRESSIVE MODE.");
     }
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null || event.getPackageName() == null) return;
+        
+        // IGNORE KEYBOARD ONLY
         String pkgName = event.getPackageName().toString().toLowerCase();
-
-        // 1. IGNORE NOISE
-        if (pkgName.contains("inputmethod") || pkgName.contains("systemui")) return;
+        if (pkgName.contains("inputmethod")) return;
 
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return;
@@ -73,87 +73,66 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         String targetAppName = prefs.getString(KEY_TARGET_APP_LABEL, "WhatsApp(Clone)");
         String targetGroup = prefs.getString(KEY_TARGET_GROUP, "");
 
-        // IF WAITING FOR RED LIGHT, FREEZE
+        // IF WAITING FOR RED LIGHT BLINK, FREEZE
         if (isClickingPending) return;
 
         // ====================================================================
-        // 2. SMART CONTEXT DETECTION (Safety + Accuracy)
+        // LOGIC: SEARCH EVERYWHERE (NO SAFETY CHECKS)
         // ====================================================================
-        
-        // A. Are we in WhatsApp? (Look for "Send to")
-        boolean isWhatsAppUI = hasText(root, "Send to") || hasText(root, "Recent chats");
 
-        // B. Are we on the Share Sheet? (Look for Target OR "Cancel")
-        // ADDED "Cancel" because your Oppo share sheet has no title, just "Cancel" at bottom.
-        boolean isShareSheet = hasText(root, targetAppName) || hasText(root, "Cancel") || hasText(root, "Share");
-
-        // SAFETY: If neither Context is visible, STOP.
-        if (!isWhatsAppUI && !isShareSheet) {
-            if (currentState != STATE_IDLE) {
-                currentState = STATE_IDLE;
-                if (OverlayService.getInstance() != null) OverlayService.getInstance().hideMarker();
-            }
-            return; 
+        // 1. ALWAYS SCAN FOR TARGET APP (SHARE SHEET LOGIC)
+        // We do not check for "Share" or "Cancel". We just look for the icon text.
+        // This runs on EVERY screen, ensuring we catch the share sheet instantly.
+        if (findMarkerAndClick(root, targetAppName, true)) {
+            performBroadcastLog("✅ Found App '" + targetAppName + "'. RED LIGHT + CLICK.");
+            currentState = STATE_SEARCHING_GROUP;
+            return; // Stop processing this event if we found the app
         }
 
-        // ====================================================================
-        // 3. SHARE SHEET LOGIC (Full Auto)
-        // ====================================================================
-        if (mode.equals("full") && !isWhatsAppUI) {
-            
-            // If we see the Target App Name, Click it!
-            if (findMarkerAndClick(root, targetAppName, true)) {
-                performBroadcastLog("✅ Share Sheet: Found '" + targetAppName + "'. RED LIGHT + CLICK.");
-                currentState = STATE_SEARCHING_GROUP;
-                return;
-            }
-            
-            // If we see "Cancel" (meaning the white dialog is open) but not the app, Scroll.
-            if (hasText(root, "Cancel") && !isScrolling) {
-                performScroll(root);
-            }
+        // 2. ALWAYS SCAN FOR "SEND TO" (WHATSAPP ENTRY DETECTION)
+        if (hasText(root, "Send to")) {
+             if (currentState != STATE_SEARCHING_GROUP && currentState != STATE_CLICKING_SEND) {
+                 performBroadcastLog("⚡ WhatsApp Detected. Switching to Group Search.");
+                 currentState = STATE_SEARCHING_GROUP;
+             }
         }
 
-        // ====================================================================
-        // 4. WHATSAPP LOGIC (Semi & Full)
-        // ====================================================================
-        if (isWhatsAppUI) {
-            
-            // Set State if just arrived
-            if (currentState == STATE_IDLE || currentState == STATE_SEARCHING_SHARE_SHEET) {
-                performBroadcastLog("⚡ WhatsApp Detected. Searching Group...");
-                currentState = STATE_SEARCHING_GROUP;
-            }
-
-            // SEARCH FOR GROUP
-            if (currentState == STATE_SEARCHING_GROUP) {
-                if (targetGroup.isEmpty()) return;
-
+        // 3. SEARCH FOR GROUP NAME
+        if (currentState == STATE_SEARCHING_GROUP) {
+            if (!targetGroup.isEmpty()) {
                 if (findMarkerAndClick(root, targetGroup, true)) {
                     performBroadcastLog("✅ Group Found. RED LIGHT + CLICK.");
                     currentState = STATE_CLICKING_SEND;
                     return;
                 }
-
-                if (!isScrolling) performScroll(root);
             }
-
-            // CLICK SEND
-            else if (currentState == STATE_CLICKING_SEND) {
-                boolean found = false;
-                
-                // Try New ID (Green Arrow)
-                if (findMarkerAndClickID(root, "com.whatsapp:id/conversation_send_arrow")) found = true;
-                // Try Old ID
-                if (!found && findMarkerAndClickID(root, "com.whatsapp:id/send")) found = true;
-                // Try Text
-                if (!found && findMarkerAndClick(root, "Send", false)) found = true;
-
-                if (found) {
-                    performBroadcastLog("🚀 SENT! Job Done.");
-                    currentState = STATE_IDLE;
-                }
+            // Scroll only if we are inside WhatsApp (checked by package or Send to)
+            // to avoid scrolling the home screen randomly.
+            if (pkgName.contains("whatsapp") && !isScrolling) {
+                performScroll(root);
             }
+        }
+
+        // 4. SEARCH FOR SEND BUTTON
+        if (currentState == STATE_CLICKING_SEND) {
+            boolean found = false;
+            if (findMarkerAndClickID(root, "com.whatsapp:id/conversation_send_arrow")) found = true;
+            if (!found && findMarkerAndClickID(root, "com.whatsapp:id/send")) found = true;
+            if (!found && findMarkerAndClick(root, "Send", false)) found = true;
+
+            if (found) {
+                performBroadcastLog("🚀 SENT! Job Done.");
+                currentState = STATE_IDLE;
+            }
+        }
+        
+        // 5. FALLBACK SCROLL FOR SHARE SHEET (FULL AUTO ONLY)
+        // If we are in Full Auto, and we see "Cancel" (Share Sheet) but NOT the app, Scroll.
+        if (mode.equals("full") && hasText(root, "Cancel") && !isScrolling) {
+             // Double check we aren't in WhatsApp before scrolling the share sheet
+             if (!pkgName.contains("whatsapp")) {
+                 performScroll(root);
+             }
         }
     }
 
@@ -161,26 +140,36 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     // UTILITIES
     // ====================================================================
 
-    private boolean hasText(AccessibilityNodeInfo root, String text) {
-        if (root == null || text == null) return false;
-        // Case insensitive, ignore spaces AND NEW LINES (Fix for Oppo split text)
-        String cleanTarget = text.toLowerCase().replace(" ", "").replace("\n", "").trim();
-        
-        List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(cleanTarget);
-        if (nodes != null && !nodes.isEmpty()) return true;
-        
-        // Fallback recursive check for weird layouts
-        return recursiveCheckText(root, cleanTarget);
+    private String cleanText(String input) {
+        if (input == null) return "";
+        // Remove spaces, newlines, brackets () to fix "WhatsApp(Clone )" mismatch
+        return input.toLowerCase()
+                .replace(" ", "")
+                .replace("\n", "")
+                .replace("(", "")
+                .replace(")", "")
+                .trim();
     }
 
-    private boolean recursiveCheckText(AccessibilityNodeInfo node, String text) {
+    private boolean hasText(AccessibilityNodeInfo root, String text) {
+        if (root == null || text == null) return false;
+        String target = cleanText(text);
+        List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(target); // Android basic search
+        if (nodes != null && !nodes.isEmpty()) return true;
+        return recursiveCheckText(root, target); // Deep search
+    }
+
+    private boolean recursiveCheckText(AccessibilityNodeInfo node, String targetClean) {
         if (node == null) return false;
-        // Fix: also replace \n in the node text before checking
-        if (node.getText() != null && node.getText().toString().toLowerCase().replace(" ", "").replace("\n", "").contains(text)) return true;
-        if (node.getContentDescription() != null && node.getContentDescription().toString().toLowerCase().replace(" ", "").replace("\n", "").contains(text)) return true;
+        
+        CharSequence nodeText = node.getText();
+        CharSequence nodeDesc = node.getContentDescription();
+        
+        if (nodeText != null && cleanText(nodeText.toString()).contains(targetClean)) return true;
+        if (nodeDesc != null && cleanText(nodeDesc.toString()).contains(targetClean)) return true;
         
         for (int i = 0; i < node.getChildCount(); i++) {
-            if (recursiveCheckText(node.getChild(i), text)) return true;
+            if (recursiveCheckText(node.getChild(i), targetClean)) return true;
         }
         return false;
     }
@@ -188,7 +177,7 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     private boolean findMarkerAndClick(AccessibilityNodeInfo root, String text, boolean isTextSearch) {
         if (root == null || text == null || text.isEmpty()) return false;
         
-        // Direct Search
+        // 1. FAST SEARCH (Android API)
         List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(text);
         if (nodes != null && !nodes.isEmpty()) {
             for (AccessibilityNodeInfo node : nodes) {
@@ -198,7 +187,7 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                 }
             }
         }
-        // Deep Search (Handles "WhatsApp(Clone )" with spaces)
+        // 2. DEEP SEARCH (Recursive Clean Match)
         return recursiveSearchAndClick(root, text);
     }
 
@@ -216,16 +205,15 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         if (node == null) return false;
         boolean match = false;
         
-        String cleanTarget = text.toLowerCase().replace(" ", "").replace("\n", "");
+        String targetClean = cleanText(text);
         
+        // Check Text
         if (node.getText() != null) {
-            String nodeText = node.getText().toString().toLowerCase().replace(" ", "").replace("\n", "");
-            if (nodeText.contains(cleanTarget)) match = true;
+            if (cleanText(node.getText().toString()).contains(targetClean)) match = true;
         }
-        
+        // Check Content Description
         if (!match && node.getContentDescription() != null) {
-            String desc = node.getContentDescription().toString().toLowerCase().replace(" ", "").replace("\n", "");
-            if (desc.contains(cleanTarget)) match = true;
+            if (cleanText(node.getContentDescription().toString()).contains(targetClean)) match = true;
         }
         
         if (match) {
@@ -252,12 +240,12 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         Rect bounds = new Rect();
         node.getBoundsInScreen(bounds);
 
-        // 1. DRAW RED LIGHT
+        // SHOW RED LIGHT
         if (OverlayService.getInstance() != null) {
             OverlayService.getInstance().showMarkerAt(bounds);
         }
 
-        // 2. WAIT 500ms -> CLICK
+        // WAIT THEN CLICK
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
             performClick(node);
             isClickingPending = false;

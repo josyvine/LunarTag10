@@ -26,6 +26,10 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     private static final String KEY_ICON_X = "share_icon_x";
     private static final String KEY_ICON_Y = "share_icon_y";
 
+    // JOB CONTROL TOKENS
+    private static final String KEY_JOB_PENDING = "job_is_pending";
+    private static final String KEY_FORCE_RESET = "force_reset_logic";
+
     // STATES
     private static final int STATE_IDLE = 0;
     private static final int STATE_SEARCHING_SHARE_SHEET = 1;
@@ -35,9 +39,6 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     private int currentState = STATE_IDLE;
     private boolean isScrolling = false;
     private boolean isClickingPending = false; 
-    
-    // NEW: ONE SHOT FLAG (Prevents machine-gun clicking)
-    private boolean hasClickedShareSheet = false;
 
     @Override
     protected void onServiceConnected() {
@@ -61,7 +62,7 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         }
 
         currentState = STATE_IDLE;
-        performBroadcastLog("🔴 ROBOT ONLINE. ONE-SHOT MODE READY.");
+        performBroadcastLog("🔴 ROBOT ONLINE. TOKEN SYSTEM READY.");
     }
 
     @Override
@@ -78,6 +79,21 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         String mode = prefs.getString(KEY_AUTO_MODE, "semi");
         String targetGroup = prefs.getString(KEY_TARGET_GROUP, "");
 
+        // ====================================================================
+        // 0. BRAIN WIPE (RESET LOGIC)
+        // ====================================================================
+        // Check if the Camera/Alarm ordered a reset
+        boolean forceReset = prefs.getBoolean(KEY_FORCE_RESET, false);
+        if (forceReset) {
+            currentState = STATE_IDLE;
+            isClickingPending = false;
+            isScrolling = false;
+            
+            // Consume the command so we don't reset again
+            prefs.edit().putBoolean(KEY_FORCE_RESET, false).apply();
+            performBroadcastLog("🔄 BRAIN WIPED. Ready for new job.");
+        }
+
         if (root == null) return;
         if (isClickingPending) return;
 
@@ -87,18 +103,10 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         boolean isWhatsAppUI = hasText(root, "Send to") || hasText(root, "Recent chats");
 
         // B. Share Sheet Detection (Stricter)
-        // We look for "Cancel" text OR specific chooser packages.
         boolean isShareSheet = hasText(root, "Cancel") || 
                                pkgName.equals("android") || 
                                pkgName.equals("com.android.intentchooser") ||
                                pkgName.contains("chooser");
-
-        // --- LOGIC: RESET ONE-SHOT FLAG ---
-        // If we are NOT on the share sheet and NOT in WhatsApp, reset the flag.
-        // This means we are back at Camera or Home, ready for a new job.
-        if (!isShareSheet && !isWhatsAppUI) {
-            hasClickedShareSheet = false; 
-        }
 
         // Safety Return
         if (!isWhatsAppUI && !isShareSheet) {
@@ -106,13 +114,17 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         }
 
         // ====================================================================
-        // 3. SHARE SHEET LOGIC (ONE-SHOT COORDINATE CLICKER)
+        // 3. SHARE SHEET LOGIC (STRICT TOKEN SYSTEM)
         // ====================================================================
         if (mode.equals("full") && isShareSheet && !isWhatsAppUI) {
 
-            // CHECK: Did we already click this session?
-            if (hasClickedShareSheet) {
-                return; // STOP. Do not click again. Wait for WhatsApp to open.
+            // CRITICAL CHECK: Do we have a permission ticket?
+            boolean hasJobToken = prefs.getBoolean(KEY_JOB_PENDING, false);
+
+            if (!hasJobToken) {
+                // We see the Share Sheet, but we have NO permission. 
+                // DO NOTHING. Stand Down.
+                return; 
             }
 
             // 1. Read Coordinates
@@ -125,13 +137,14 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                     OverlayService.getInstance().showMarkerAtCoordinate(x, y);
                 }
 
-                // 3. EXECUTE BLIND CLICK (With 100ms Duration)
-                performBroadcastLog("✅ Share Sheet Detected. Firing ONE SHOT at X=" + x + " Y=" + y);
+                // 3. EXECUTE CLICK
+                performBroadcastLog("✅ Token Valid. Clicking X=" + x + " Y=" + y);
                 dispatchGesture(createClickGesture(x, y), null, null);
 
-                // 4. LOCK THE TRIGGER
-                hasClickedShareSheet = true; // Prevent further clicks until menu closes
+                // 4. SELF DESTRUCT THE TOKEN (Disable on First Click)
+                prefs.edit().putBoolean(KEY_JOB_PENDING, false).apply();
                 
+                // 5. Advance State
                 currentState = STATE_SEARCHING_GROUP;
                 
                 // Pause to allow app launch
@@ -145,8 +158,6 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         // 4. WHATSAPP LOGIC (TEXT CLICKER - UNTOUCHED)
         // ====================================================================
         if (isWhatsAppUI) {
-            // Reset the Share Sheet flag because we have successfully arrived in WhatsApp
-            hasClickedShareSheet = false; 
 
             if (currentState == STATE_IDLE || currentState == STATE_SEARCHING_SHARE_SHEET) {
                 performBroadcastLog("⚡ WhatsApp Detected. Searching Group...");
@@ -174,7 +185,16 @@ public class LunarTagAccessibilityService extends AccessibilityService {
 
                 if (found) {
                     performBroadcastLog("🚀 SENT! Job Done.");
+                    
+                    // --- FINAL RESET LOGIC ---
                     currentState = STATE_IDLE;
+                    
+                    // Double check token is dead
+                    prefs.edit().putBoolean(KEY_JOB_PENDING, false).apply();
+
+                    // Show Toast
+                    new Handler(Looper.getMainLooper()).post(() -> 
+                        Toast.makeText(getApplicationContext(), "🚀 JOB DONE", Toast.LENGTH_LONG).show());
                 }
             }
         }
@@ -184,12 +204,10 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     // UTILITIES
     // ====================================================================
 
-    // UPDATED: Creates a robust 100ms tap
     private GestureDescription createClickGesture(int x, int y) {
         Path clickPath = new Path();
         clickPath.moveTo(x, y);
-        
-        // Duration 100ms: Ensures Android registers it as a valid tap
+        // 100ms duration for reliable click
         GestureDescription.StrokeDescription clickStroke = 
                 new GestureDescription.StrokeDescription(clickPath, 0, 100);
         

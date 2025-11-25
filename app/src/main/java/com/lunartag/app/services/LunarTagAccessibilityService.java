@@ -34,6 +34,9 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     private boolean isClickingPending = false; 
     private boolean isScrolling = false;
     private long lastToastTime = 0;
+    
+    // Safety flag to prevent Share Sheet loop without killing the token
+    private boolean shareSheetClicked = false;
 
     // Fixed variables
     private static final int STATE_IDLE = 0;
@@ -92,14 +95,19 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         if (isClickingPending) return;
 
         // ====================================================================
-        // 3. SHARE SHEET LOGIC (Coordinate Click)
+        // 3. SHARE SHEET LOGIC (Coordinate Click - One Shot)
         // ====================================================================
         boolean isShareSheet = hasText(root, "Cancel") || pkgName.equals("android") || pkgName.contains("chooser");
+        
+        // Reset the local Share Sheet flag if we are NOT on the share sheet
+        if (!isShareSheet) {
+            shareSheetClicked = false;
+        }
 
         if (mode.equals("full") && isShareSheet && !pkgName.contains("whatsapp")) {
             
-            // Only click if the Job Token is TRUE
-            if (prefs.getBoolean(KEY_JOB_PENDING, false)) {
+            // Only click if Job is TRUE AND we haven't clicked this specific instance yet.
+            if (prefs.getBoolean(KEY_JOB_PENDING, false) && !shareSheetClicked) {
                 int x = prefs.getInt(KEY_ICON_X, 0);
                 int y = prefs.getInt(KEY_ICON_Y, 0);
 
@@ -109,15 +117,20 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                     }
 
                     performBroadcastLog("✅ Share Sheet. Clicking X=" + x + " Y=" + y);
+                    
+                    // Mark as clicked so we don't loop/flash while the sheet is closing
+                    shareSheetClicked = true;
                     isClickingPending = true;
                     
                     // Delay 500ms for animation
                     new Handler(Looper.getMainLooper()).postDelayed(() -> {
                         dispatchGesture(createClickGesture(x, y), null, null);
-                        isClickingPending = false; 
                         
-                        // FIX: WE DO NOT TURN OFF 'KEY_JOB_PENDING' HERE.
-                        // We leave it TRUE so the robot stays active when WhatsApp opens.
+                        // IMPORTANT: We do NOT set KEY_JOB_PENDING to false here anymore.
+                        // We keep it TRUE so the robot knows to work when WhatsApp opens.
+                        // The 'shareSheetClicked' flag prevents the loop on this screen.
+                        
+                        isClickingPending = false; 
                     }, 500);
                 }
             }
@@ -129,23 +142,22 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         // ====================================================================
         if (pkgName.contains("whatsapp")) {
 
-            // CRITICAL GUARD:
-            // The robot is NOT allowed to do anything in WhatsApp unless a JOB IS PENDING.
-            // This prevents it from clicking "Send" when you are typing personally.
+            // CRITICAL GUARD: 
+            // Robot only works if JOB_PENDING is true. 
+            // This protects your personal usage (no random clicks while typing).
             if (prefs.getBoolean(KEY_JOB_PENDING, false)) {
 
-                // --- SEARCH FOR ANY SEND BUTTON (Chat OR Preview Screen) ---
+                // --- SEARCH FOR ANY SEND BUTTON ---
                 boolean sendFound = false;
                 
-                // 1. Check Standard IDs (Text Chat)
+                // 1. Standard Chat IDs
                 if (findMarkerAndClickID(root, "com.whatsapp:id/conversation_send_arrow")) sendFound = true;
                 if (!sendFound && findMarkerAndClickID(root, "com.whatsapp:id/send")) sendFound = true;
                 
-                // 2. Check Floating Button ID (Common on Preview Screen)
+                // 2. Floating Button (Preview Screen)
                 if (!sendFound && findMarkerAndClickID(root, "com.whatsapp:id/fab")) sendFound = true;
                 
-                // 3. SPECIAL GREEN BUTTON CHECK (Content Description Search)
-                // This targets the green button in your screenshot which has description "Send".
+                // 3. Content Description Search (Green Button Fix)
                 if (!sendFound && findMarkerAndClickContentDescription(root, "Send")) sendFound = true;
                 
                 if (sendFound) {

@@ -78,23 +78,23 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         // ====================================================================
         if (targetAppName.equals("SETUP")) {
             
-            // SECURITY CHECK: Don't learn anything until we actually see the Share Sheet.
-            // This prevents the robot from learning "Settings" or "Save" by mistake.
-            if (root == null || (!hasText(root, "Share") && !hasText(root, "Cancel"))) {
-                return; // Wait for the Share Sheet to appear
+            // GATEKEEPER: ONLY TRAIN IF WE SEE "CANCEL" (This proves we are on Share Sheet)
+            // We ignore the App Name here so we don't accidentally learn the main app screen.
+            if (root == null || !hasText(root, "Cancel")) {
+                return; // Wait for the real Share Sheet (the one with 'Cancel')
             }
 
             if (event.getEventType() == AccessibilityEvent.TYPE_VIEW_CLICKED) {
                 AccessibilityNodeInfo clickedNode = event.getSource();
                 if (clickedNode != null) {
-                    // Extract text from the clicked item or its children
                     String signature = extractTextFromNode(clickedNode);
 
-                    if (signature != null && !signature.isEmpty() && !signature.equalsIgnoreCase("cancel")) {
+                    // Don't let the robot learn the word "Cancel" itself
+                    if (signature != null && !signature.isEmpty() && !cleanString(signature).contains("cancel")) {
+                        
                         // SAVE THE LEARNED SIGNATURE
                         prefs.edit().putString(KEY_TARGET_APP_LABEL, signature).apply();
 
-                        // VISUAL CONFIRMATION
                         new Handler(Looper.getMainLooper()).post(() -> 
                             Toast.makeText(getApplicationContext(), "✅ Robot Learned: " + signature, Toast.LENGTH_LONG).show());
 
@@ -102,7 +102,7 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                     }
                 }
             }
-            return; // STOP HERE. Do not auto-click while training.
+            return; // STOP HERE.
         }
 
         // ====================================================================
@@ -110,24 +110,21 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         // ====================================================================
 
         if (root == null) return;
-
-        // IF WAITING FOR RED LIGHT, FREEZE
         if (isClickingPending) return;
 
         // 2. SMART CONTEXT DETECTION
 
-        // A. Are we in WhatsApp? (Look for "Send to")
+        // A. Are we in WhatsApp? (Look for "Send to" or Chat List)
         boolean isWhatsAppUI = hasText(root, "Send to") || hasText(root, "Recent chats");
 
-        // B. Are we on the Share Sheet? (Look for Target OR "Cancel")
-        boolean isShareSheet = hasText(root, targetAppName) || hasText(root, "Cancel") || hasText(root, "Share");
+        // B. Are we on the Share Sheet? 
+        // CRITICAL FIX: ONLY TRUST "CANCEL" OR "SHARE". 
+        // DO NOT TRUST 'targetAppName' (because that text exists on your Main App too!)
+        boolean isShareSheet = hasText(root, "Cancel") || hasText(root, "Share");
 
-        // SAFETY: If neither Context is visible, we might be transitioning. 
-        // DO NOT RESET STATE IMMEDIATELY (Fixes the "3 times" stop bug).
+        // SAFETY: If neither Context is visible, wait.
         if (!isWhatsAppUI && !isShareSheet) {
-            // Only reset if we are truly lost for a long time, but for now, just wait.
-            // If the user manually left the app, the service will just wait.
-            return; 
+             return; 
         }
 
         // ====================================================================
@@ -135,7 +132,8 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         // ====================================================================
         if (mode.equals("full") && !isWhatsAppUI) {
 
-            // If we see the Target App Name (Learned or Typed), Click it!
+            // NOW we look for the target ("WhatsApp(Clone)"). 
+            // The cleanString function handles the weird bracket newline automatically.
             if (findMarkerAndClick(root, targetAppName, true)) {
                 performBroadcastLog("✅ Share Sheet: Found '" + targetAppName + "'. RED LIGHT + CLICK.");
                 currentState = STATE_SEARCHING_GROUP;
@@ -153,13 +151,11 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         // ====================================================================
         if (isWhatsAppUI) {
 
-            // Set State if just arrived or if we were waiting
             if (currentState == STATE_IDLE || currentState == STATE_SEARCHING_SHARE_SHEET) {
                 performBroadcastLog("⚡ WhatsApp Detected. Searching Group...");
                 currentState = STATE_SEARCHING_GROUP;
             }
 
-            // SEARCH FOR GROUP
             if (currentState == STATE_SEARCHING_GROUP) {
                 if (targetGroup.isEmpty()) return;
 
@@ -168,14 +164,11 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                     currentState = STATE_CLICKING_SEND;
                     return;
                 }
-
                 if (!isScrolling) performScroll(root);
             }
 
-            // CLICK SEND
             else if (currentState == STATE_CLICKING_SEND) {
                 boolean found = false;
-
                 if (findMarkerAndClickID(root, "com.whatsapp:id/conversation_send_arrow")) found = true;
                 if (!found && findMarkerAndClickID(root, "com.whatsapp:id/send")) found = true;
                 if (!found && findMarkerAndClick(root, "Send", false)) found = true;
@@ -192,7 +185,6 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     // UTILITIES
     // ====================================================================
 
-    // Helper for Training Mode to find text inside a clicked icon layout
     private String extractTextFromNode(AccessibilityNodeInfo node) {
         if (node == null) return null;
         if (node.getText() != null && !node.getText().toString().isEmpty()) return node.getText().toString();
@@ -208,7 +200,7 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     private boolean hasText(AccessibilityNodeInfo root, String text) {
         if (root == null || text == null) return false;
         String cleanTarget = cleanString(text);
-
+        
         List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(cleanTarget);
         if (nodes != null && !nodes.isEmpty()) return true;
 
@@ -229,7 +221,6 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     private boolean findMarkerAndClick(AccessibilityNodeInfo root, String text, boolean isTextSearch) {
         if (root == null || text == null || text.isEmpty()) return false;
 
-        // Direct Search
         List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(text);
         if (nodes != null && !nodes.isEmpty()) {
             for (AccessibilityNodeInfo node : nodes) {
@@ -239,7 +230,6 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                 }
             }
         }
-        // Deep Search
         return recursiveSearchAndClick(root, text);
     }
 
@@ -256,9 +246,9 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     private boolean recursiveSearchAndClick(AccessibilityNodeInfo node, String text) {
         if (node == null) return false;
         boolean match = false;
-
         String cleanTarget = cleanString(text);
 
+        // This cleanString removes the newline, so "WhatsApp(Clone \n )" matches "WhatsApp(Clone)"
         if (node.getText() != null && cleanString(node.getText().toString()).contains(cleanTarget)) match = true;
         if (!match && node.getContentDescription() != null && cleanString(node.getContentDescription().toString()).contains(cleanTarget)) match = true;
 
@@ -279,13 +269,13 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         return false;
     }
 
-    // Helper to normalize text for comparison
+    // THIS FUNCTION SAVES YOU FROM THE BRACKET PROBLEM
     private String cleanString(String input) {
         if (input == null) return "";
         return input.toLowerCase()
                 .replace(" ", "")
-                .replace("\u200B", "") // Remove zero-width spaces often found in WhatsApp
-                .replace("\n", "")
+                .replace("\n", "") // <--- REMOVES THE ENTER KEY
+                .replace("\u200B", "")
                 .trim();
     }
 

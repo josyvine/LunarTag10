@@ -123,6 +123,7 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         boolean isShareSheet = hasText(root, "Cancel") || hasText(root, "Share");
 
         // SAFETY: If neither Context is visible, wait.
+        // DO NOT RESET TO STATE_IDLE HERE. Just return. This fixes the "stops after 3 times" bug.
         if (!isWhatsAppUI && !isShareSheet) {
              return; 
         }
@@ -134,6 +135,7 @@ public class LunarTagAccessibilityService extends AccessibilityService {
 
             // NOW we look for the target ("WhatsApp(Clone)"). 
             // The cleanString function handles the weird bracket newline automatically.
+            // Updated findMarkerAndClick now climbs the tree to find the Grandparent button (Red Blink Fix).
             if (findMarkerAndClick(root, targetAppName, true)) {
                 performBroadcastLog("✅ Share Sheet: Found '" + targetAppName + "'. RED LIGHT + CLICK.");
                 currentState = STATE_SEARCHING_GROUP;
@@ -218,14 +220,24 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         return false;
     }
 
+    // UPDATED: This now implements the "Elevator Logic" to find Grandparent buttons.
     private boolean findMarkerAndClick(AccessibilityNodeInfo root, String text, boolean isTextSearch) {
         if (root == null || text == null || text.isEmpty()) return false;
 
         List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(text);
         if (nodes != null && !nodes.isEmpty()) {
             for (AccessibilityNodeInfo node : nodes) {
-                if (node.isClickable() || node.getParent().isClickable()) {
-                    executeVisualClick(node);
+                // CLIMB UP TO 6 LAYERS TO FIND A CLICKABLE ANCESTOR
+                // This forces the Red Blink even if the text itself says "Not Clickable"
+                AccessibilityNodeInfo clickable = node;
+                int depth = 0;
+                while (clickable != null && !clickable.isClickable() && depth < 6) {
+                    clickable = clickable.getParent();
+                    depth++;
+                }
+
+                if (clickable != null && clickable.isClickable()) {
+                    executeVisualClick(clickable); // Click the ANCESTOR (Grandparent), not the text
                     return true;
                 }
             }
@@ -248,11 +260,12 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         boolean match = false;
         String cleanTarget = cleanString(text);
 
-        // This cleanString removes the newline, so "WhatsApp(Clone \n )" matches "WhatsApp(Clone)"
+        // The cleanString removes the newline, handling the bracket issue
         if (node.getText() != null && cleanString(node.getText().toString()).contains(cleanTarget)) match = true;
         if (!match && node.getContentDescription() != null && cleanString(node.getContentDescription().toString()).contains(cleanTarget)) match = true;
 
         if (match) {
+            // CLIMB UP LOGIC (Already present here, but critical for consistency)
             AccessibilityNodeInfo clickable = node;
             while (clickable != null && !clickable.isClickable()) {
                 clickable = clickable.getParent();
@@ -269,7 +282,6 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         return false;
     }
 
-    // THIS FUNCTION SAVES YOU FROM THE BRACKET PROBLEM
     private String cleanString(String input) {
         if (input == null) return "";
         return input.toLowerCase()

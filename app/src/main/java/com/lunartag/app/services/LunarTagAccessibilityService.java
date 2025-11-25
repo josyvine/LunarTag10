@@ -37,8 +37,17 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     private static final int STATE_CLICKING_SEND = 3;
 
     private int currentState = STATE_IDLE;
-    private boolean isScrolling = false;
     private boolean isClickingPending = false; 
+    
+    // TIMEOUT HANDLER (Fixes Zombie State)
+    private final Handler timeoutHandler = new Handler(Looper.getMainLooper());
+    private final Runnable resetRunnable = () -> {
+        if (currentState != STATE_IDLE) {
+            performBroadcastLog("⚠️ TIMEOUT: Robot stuck. Forcing Reset.");
+            currentState = STATE_IDLE;
+            isClickingPending = false;
+        }
+    };
 
     @Override
     protected void onServiceConnected() {
@@ -62,7 +71,7 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         }
 
         currentState = STATE_IDLE;
-        performBroadcastLog("🔴 ROBOT ONLINE. TOKEN SYSTEM READY.");
+        performBroadcastLog("🔴 ROBOT ONLINE. CHROME BLOCKER ACTIVE.");
     }
 
     @Override
@@ -70,97 +79,90 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         if (event == null || event.getPackageName() == null) return;
         String pkgName = event.getPackageName().toString().toLowerCase();
 
-        // 1. IGNORE NOISE
-        if (pkgName.contains("inputmethod") || pkgName.contains("systemui")) return;
+        // ====================================================================
+        // 1. STRICT SECURITY FILTER (Fixes Chrome Clicking)
+        // ====================================================================
+        // If it is NOT WhatsApp, and NOT Android System, STOP IMMEDIATELY.
+        boolean isSafePackage = pkgName.contains("whatsapp") || 
+                                pkgName.equals("android") || 
+                                pkgName.contains("chooser") || 
+                                pkgName.contains("systemui");
+
+        if (!isSafePackage) {
+            return; // IGNORE Chrome, YouTube, etc.
+        }
 
         AccessibilityNodeInfo root = getRootInActiveWindow();
-        
         SharedPreferences prefs = getSharedPreferences(PREFS_ACCESSIBILITY, Context.MODE_PRIVATE);
         String mode = prefs.getString(KEY_AUTO_MODE, "semi");
         String targetGroup = prefs.getString(KEY_TARGET_GROUP, "");
 
         // ====================================================================
-        // 0. BRAIN WIPE (RESET LOGIC)
+        // 2. BRAIN WIPE (From SendService)
         // ====================================================================
-        // Check if the Camera/Alarm ordered a reset
-        boolean forceReset = prefs.getBoolean(KEY_FORCE_RESET, false);
-        if (forceReset) {
+        if (prefs.getBoolean(KEY_FORCE_RESET, false)) {
             currentState = STATE_IDLE;
             isClickingPending = false;
-            isScrolling = false;
-            
-            // Consume the command so we don't reset again
             prefs.edit().putBoolean(KEY_FORCE_RESET, false).apply();
-            performBroadcastLog("🔄 BRAIN WIPED. Ready for new job.");
+            performBroadcastLog("🔄 NEW JOB: Memory Wiped.");
+            
+            // Start a safety timer. If job isn't done in 15 seconds, reset.
+            timeoutHandler.removeCallbacks(resetRunnable);
+            timeoutHandler.postDelayed(resetRunnable, 15000);
         }
 
         if (root == null) return;
         if (isClickingPending) return;
 
-        // 2. CONTEXT DETECTION
-
-        // A. WhatsApp Detection
-        boolean isWhatsAppUI = hasText(root, "Send to") || hasText(root, "Recent chats");
-
-        // B. Share Sheet Detection (Stricter)
-        boolean isShareSheet = hasText(root, "Cancel") || 
-                               pkgName.equals("android") || 
-                               pkgName.equals("com.android.intentchooser") ||
-                               pkgName.contains("chooser");
-
-        // Safety Return
-        if (!isWhatsAppUI && !isShareSheet) {
-             return; 
-        }
-
         // ====================================================================
-        // 3. SHARE SHEET LOGIC (STRICT TOKEN SYSTEM)
+        // 3. SHARE SHEET LOGIC (Coordinate Click)
         // ====================================================================
-        if (mode.equals("full") && isShareSheet && !isWhatsAppUI) {
+        // STRICT TRIGGER: Only "Cancel" text OR "android" package
+        boolean isShareSheet = hasText(root, "Cancel") || pkgName.equals("android") || pkgName.contains("chooser");
 
-            // CRITICAL CHECK: Do we have a permission ticket?
-            boolean hasJobToken = prefs.getBoolean(KEY_JOB_PENDING, false);
+        if (mode.equals("full") && isShareSheet && !pkgName.contains("whatsapp")) {
 
-            if (!hasJobToken) {
-                // We see the Share Sheet, but we have NO permission. 
-                // DO NOTHING. Stand Down.
-                return; 
+            // JOB TOKEN CHECK
+            if (!prefs.getBoolean(KEY_JOB_PENDING, false)) {
+                return; // No ticket, no click.
             }
 
-            // 1. Read Coordinates
             int x = prefs.getInt(KEY_ICON_X, 0);
             int y = prefs.getInt(KEY_ICON_Y, 0);
 
             if (x > 0 && y > 0) {
-                // 2. TRIGGER VISUAL BLINK
+                // A. VISUAL BLINK
                 if (OverlayService.getInstance() != null) {
                     OverlayService.getInstance().showMarkerAtCoordinate(x, y);
                 }
 
-                // 3. EXECUTE CLICK
-                performBroadcastLog("✅ Token Valid. Clicking X=" + x + " Y=" + y);
-                dispatchGesture(createClickGesture(x, y), null, null);
-
-                // 4. SELF DESTRUCT THE TOKEN (Disable on First Click)
-                prefs.edit().putBoolean(KEY_JOB_PENDING, false).apply();
-                
-                // 5. Advance State
-                currentState = STATE_SEARCHING_GROUP;
-                
-                // Pause to allow app launch
+                // B. DELAYED CLICK (Fixes "Blink but No Click")
+                // Wait 500ms for animation to stop, THEN click.
+                performBroadcastLog("✅ Share Sheet. Waiting 500ms to click...");
                 isClickingPending = true;
-                new Handler(Looper.getMainLooper()).postDelayed(() -> isClickingPending = false, 2000);
+                
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    performBroadcastLog("👉 FIRING CLICK at " + x + "," + y);
+                    dispatchGesture(createClickGesture(x, y), null, null);
+                    
+                    // DISABLE TOKEN IMMEDIATELY
+                    prefs.edit().putBoolean(KEY_JOB_PENDING, false).apply();
+                    
+                    currentState = STATE_SEARCHING_GROUP;
+                    isClickingPending = false; 
+                }, 500); // <--- 500ms DELAY ADDED HERE
+
                 return;
             }
         }
 
         // ====================================================================
-        // 4. WHATSAPP LOGIC (TEXT CLICKER - UNTOUCHED)
+        // 4. WHATSAPP LOGIC (Text Logic)
         // ====================================================================
-        if (isWhatsAppUI) {
+        // STRICT CHECK: ONLY RUN THIS IF PACKAGE IS WHATSAPP
+        if (pkgName.contains("whatsapp")) {
 
             if (currentState == STATE_IDLE || currentState == STATE_SEARCHING_SHARE_SHEET) {
-                performBroadcastLog("⚡ WhatsApp Detected. Searching Group...");
                 currentState = STATE_SEARCHING_GROUP;
             }
 
@@ -169,11 +171,10 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                 if (targetGroup.isEmpty()) return;
 
                 if (findMarkerAndClick(root, targetGroup, true)) {
-                    performBroadcastLog("✅ Group Found. RED LIGHT + CLICK.");
+                    performBroadcastLog("✅ Group Found. Clicking...");
                     currentState = STATE_CLICKING_SEND;
                     return;
                 }
-                if (!isScrolling) performScroll(root);
             }
 
             // CLICK SEND
@@ -186,15 +187,13 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                 if (found) {
                     performBroadcastLog("🚀 SENT! Job Done.");
                     
-                    // --- FINAL RESET LOGIC ---
+                    // SUCCESS RESET
                     currentState = STATE_IDLE;
-                    
-                    // Double check token is dead
                     prefs.edit().putBoolean(KEY_JOB_PENDING, false).apply();
+                    timeoutHandler.removeCallbacks(resetRunnable); // Stop the safety timer
 
-                    // Show Toast
                     new Handler(Looper.getMainLooper()).post(() -> 
-                        Toast.makeText(getApplicationContext(), "🚀 JOB DONE", Toast.LENGTH_LONG).show());
+                        Toast.makeText(getApplicationContext(), "🚀 JOB DONE", Toast.LENGTH_SHORT).show());
                 }
             }
         }
@@ -207,10 +206,9 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     private GestureDescription createClickGesture(int x, int y) {
         Path clickPath = new Path();
         clickPath.moveTo(x, y);
-        // 100ms duration for reliable click
+        // Hold for 70ms to register firmly
         GestureDescription.StrokeDescription clickStroke = 
-                new GestureDescription.StrokeDescription(clickPath, 0, 100);
-        
+                new GestureDescription.StrokeDescription(clickPath, 0, 70);
         GestureDescription.Builder clickBuilder = new GestureDescription.Builder();
         clickBuilder.addStroke(clickStroke);
         return clickBuilder.build();
@@ -219,10 +217,8 @@ public class LunarTagAccessibilityService extends AccessibilityService {
     private boolean hasText(AccessibilityNodeInfo root, String text) {
         if (root == null || text == null) return false;
         String cleanTarget = cleanString(text);
-        
         List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(cleanTarget);
         if (nodes != null && !nodes.isEmpty()) return true;
-
         return recursiveCheckText(root, cleanTarget);
     }
 
@@ -230,16 +226,15 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         if (node == null) return false;
         if (node.getText() != null && cleanString(node.getText().toString()).contains(text)) return true;
         if (node.getContentDescription() != null && cleanString(node.getContentDescription().toString()).contains(text)) return true;
-
         for (int i = 0; i < node.getChildCount(); i++) {
             if (recursiveCheckText(node.getChild(i), text)) return true;
         }
         return false;
     }
 
+    // Helper for WhatsApp Internal Logic
     private boolean findMarkerAndClick(AccessibilityNodeInfo root, String text, boolean isTextSearch) {
         if (root == null || text == null || text.isEmpty()) return false;
-
         List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(text);
         if (nodes != null && !nodes.isEmpty()) {
             for (AccessibilityNodeInfo node : nodes) {
@@ -266,7 +261,6 @@ public class LunarTagAccessibilityService extends AccessibilityService {
         if (node == null) return false;
         boolean match = false;
         String cleanTarget = cleanString(text);
-
         if (node.getText() != null && cleanString(node.getText().toString()).contains(cleanTarget)) match = true;
         if (!match && node.getContentDescription() != null && cleanString(node.getContentDescription().toString()).contains(cleanTarget)) match = true;
 
@@ -280,7 +274,6 @@ public class LunarTagAccessibilityService extends AccessibilityService {
                 return true;
             }
         }
-
         for (int i = 0; i < node.getChildCount(); i++) {
             if (recursiveSearchAndClick(node.getChild(i), text)) return true;
         }
@@ -289,24 +282,17 @@ public class LunarTagAccessibilityService extends AccessibilityService {
 
     private String cleanString(String input) {
         if (input == null) return "";
-        return input.toLowerCase()
-                .replace(" ", "")
-                .replace("\n", "")
-                .replace("\u200B", "")
-                .trim();
+        return input.toLowerCase().replace(" ", "").replace("\n", "").trim();
     }
 
     private void executeVisualClick(AccessibilityNodeInfo node) {
         if (isClickingPending) return;
         isClickingPending = true;
-
         Rect bounds = new Rect();
         node.getBoundsInScreen(bounds);
-
         if (OverlayService.getInstance() != null) {
             OverlayService.getInstance().showMarkerAt(bounds);
         }
-
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
             performClick(node);
             isClickingPending = false;
@@ -325,26 +311,6 @@ public class LunarTagAccessibilityService extends AccessibilityService {
             attempts++;
         }
         return false;
-    }
-
-    private void performScroll(AccessibilityNodeInfo root) {
-        if (isScrolling) return;
-        AccessibilityNodeInfo scrollable = findScrollable(root);
-        if (scrollable != null) {
-            isScrolling = true;
-            scrollable.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD);
-            new Handler(Looper.getMainLooper()).postDelayed(() -> isScrolling = false, 800);
-        }
-    }
-
-    private AccessibilityNodeInfo findScrollable(AccessibilityNodeInfo node) {
-        if (node == null) return null;
-        if (node.isScrollable()) return node;
-        for (int i = 0; i < node.getChildCount(); i++) {
-            AccessibilityNodeInfo res = findScrollable(node.getChild(i));
-            if (res != null) return res;
-        }
-        return null;
     }
 
     private void performBroadcastLog(String msg) {

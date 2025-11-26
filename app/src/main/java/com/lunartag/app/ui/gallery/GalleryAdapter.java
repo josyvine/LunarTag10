@@ -69,18 +69,31 @@ public class GalleryAdapter extends RecyclerView.Adapter<GalleryAdapter.PhotoVie
         holder.statusTextView.setText(currentPhoto.getStatus());
 
         // 2. Load Image Efficiently (Thumbnail size)
-        // We force a small size to prevent out-of-memory errors and lag
-        File imageFile = new File(currentPhoto.getFilePath());
-        if (imageFile.exists()) {
+        String filePath = currentPhoto.getFilePath();
+
+        // FIXED: Check for Content URI (Custom Folder) vs File Path (Internal)
+        if (filePath != null && filePath.startsWith("content://")) {
+            // It is a Custom Folder URI - Load directly via Glide
             Glide.with(context)
-                    .load(Uri.fromFile(imageFile))
+                    .load(Uri.parse(filePath))
                     .override(320, 320) // Render small for grid performance
                     .centerCrop()
                     .diskCacheStrategy(DiskCacheStrategy.ALL)
                     .into(holder.thumbnailImageView);
         } else {
-            // Clear image if file missing
-            holder.thumbnailImageView.setImageDrawable(null);
+            // It is a Default Internal File - Check existence first
+            File imageFile = new File(filePath);
+            if (imageFile.exists()) {
+                Glide.with(context)
+                        .load(Uri.fromFile(imageFile))
+                        .override(320, 320) // Render small for grid performance
+                        .centerCrop()
+                        .diskCacheStrategy(DiskCacheStrategy.ALL)
+                        .into(holder.thumbnailImageView);
+            } else {
+                // Clear image if file missing
+                holder.thumbnailImageView.setImageDrawable(null);
+            }
         }
 
         // 3. Handle Selection Mode UI

@@ -1,6 +1,7 @@
 package com.lunartag.app.ui.gallery;
 
 import android.app.AlertDialog;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -122,9 +123,18 @@ public class GalleryFragment extends Fragment {
 
                     // 2. Delete Physical File
                     try {
-                        File file = new File(photo.getFilePath());
-                        if (file.exists()) {
-                            file.delete();
+                        String filePath = photo.getFilePath();
+
+                        // FIXED: Handle Deletion for Custom Folder (SAF) vs Standard File
+                        if (filePath != null && filePath.startsWith("content://")) {
+                            // Delete using ContentResolver
+                            getContext().getContentResolver().delete(Uri.parse(filePath), null, null);
+                        } else {
+                            // Delete standard file
+                            File file = new File(filePath);
+                            if (file.exists()) {
+                                file.delete();
+                            }
                         }
                     } catch (Exception e) {
                         e.printStackTrace();

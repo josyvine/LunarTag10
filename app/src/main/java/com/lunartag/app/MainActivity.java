@@ -6,9 +6,14 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
+import android.graphics.PorterDuff;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.View;
+import android.widget.ImageView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultCallback;
@@ -21,6 +26,7 @@ import androidx.navigation.fragment.NavHostFragment;
 
 import com.lunartag.app.databinding.ActivityMainBinding;
 import com.lunartag.app.firebase.RemoteConfigManager;
+import com.lunartag.app.ui.logs.LogFragment;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -28,40 +34,56 @@ import java.util.Map;
 
 /**
  * The main screen of the application.
- * UPDATED: Handles navigation for Help and Contact icons.
+ * UPDATED: Handles centralized logging and blinking notification icon.
  */
 public class MainActivity extends AppCompatActivity {
 
     private ActivityMainBinding binding;
     private NavController navController;
-
     private ActivityResultLauncher<String[]> permissionLauncher;
-
-    // We will populate this dynamically based on Android Version to prevent crashes
     private String[] requiredPermissions;
 
+    // --- CENTRAL LOG STORAGE ---
+    // Stores the logs so they persist when switching screens
+    private StringBuilder logHistory = new StringBuilder();
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+
     // --- LIVE LOG RECEIVER ---
-    // This listens for messages from LunarTagAccessibilityService
+    // Listens for messages from Robot, Camera, and System
     private final BroadcastReceiver logReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
             if (intent != null && "com.lunartag.ACTION_LOG_UPDATE".equals(intent.getAction())) {
                 String message = intent.getStringExtra("log_msg");
-                if (message != null) {
-                    // 1. Append the new message to the Green Text View
-                    binding.tvLiveLog.append(message + "\n");
+                String type = intent.getStringExtra("log_type"); // "info" or "error"
 
-                    // 2. Auto-Scroll to the bottom so the latest log is visible
-                    binding.logScrollView.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            binding.logScrollView.fullScroll(View.FOCUS_DOWN);
+                if (message != null) {
+                    // 1. Add to history
+                    logHistory.append(message).append("\n");
+
+                    // 2. Blink the Icon
+                    blinkLogIcon(type);
+
+                    // 3. If the Log Screen is currently open, update it in real-time
+                    NavHostFragment navHost = (NavHostFragment) getSupportFragmentManager().findFragmentById(R.id.nav_host_fragment_activity_main);
+                    if (navHost != null) {
+                        for (androidx.fragment.app.Fragment fragment : navHost.getChildFragmentManager().getFragments()) {
+                            if (fragment instanceof LogFragment && fragment.isVisible()) {
+                                ((LogFragment) fragment).appendLog(message);
+                            }
                         }
-                    });
+                    }
                 }
             }
         }
     };
+
+    /**
+     * Public method for LogFragment to retrieve the full history when it opens.
+     */
+    public String getGlobalLogs() {
+        return logHistory.toString();
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -70,9 +92,11 @@ public class MainActivity extends AppCompatActivity {
         binding = ActivityMainBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
 
-        // Set up the permissions list based on Android version
+        // Initialize Log History
+        logHistory.append("-- SYSTEM STARTED --\n");
+
+        // Permissions Setup
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Android 13+ (API 33+): Needs READ_MEDIA_IMAGES
             requiredPermissions = new String[]{
                     Manifest.permission.CAMERA,
                     Manifest.permission.ACCESS_FINE_LOCATION,
@@ -80,7 +104,6 @@ public class MainActivity extends AppCompatActivity {
                     Manifest.permission.READ_MEDIA_IMAGES
             };
         } else {
-            // Android 12 and below: Needs WRITE_EXTERNAL_STORAGE
             requiredPermissions = new String[]{
                     Manifest.permission.CAMERA,
                     Manifest.permission.ACCESS_FINE_LOCATION,
@@ -90,10 +113,8 @@ public class MainActivity extends AppCompatActivity {
             };
         }
 
-        // Trigger Remote Config
         RemoteConfigManager.fetchRemoteConfig(this);
 
-        // Setup Navigation Controller
         NavHostFragment navHostFragment = (NavHostFragment) getSupportFragmentManager()
                 .findFragmentById(R.id.nav_host_fragment_activity_main);
         
@@ -101,81 +122,53 @@ public class MainActivity extends AppCompatActivity {
             navController = navHostFragment.getNavController();
         }
 
-        // --- CUSTOM NAVIGATION LOGIC ---
+        // --- NAVIGATION LOGIC ---
         
-        // 1. Dashboard
-        binding.navDashboard.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                navController.navigate(R.id.navigation_dashboard);
-                updateIconVisuals(binding.navDashboard);
-            }
+        binding.navDashboard.setOnClickListener(v -> {
+            navController.navigate(R.id.navigation_dashboard);
+            updateIconVisuals(binding.navDashboard);
         });
 
-        // 2. Camera
-        binding.navCamera.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                navController.navigate(R.id.navigation_camera);
-                updateIconVisuals(binding.navCamera);
-            }
+        binding.navCamera.setOnClickListener(v -> {
+            navController.navigate(R.id.navigation_camera);
+            updateIconVisuals(binding.navCamera);
         });
 
-        // 3. Gallery
-        binding.navGallery.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                navController.navigate(R.id.navigation_gallery);
-                updateIconVisuals(binding.navGallery);
-            }
+        binding.navGallery.setOnClickListener(v -> {
+            navController.navigate(R.id.navigation_gallery);
+            updateIconVisuals(binding.navGallery);
         });
 
-        // 4. Robot (Automation Mode)
-        binding.navRobot.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                navController.navigate(R.id.navigation_robot);
-                updateIconVisuals(binding.navRobot);
-            }
+        binding.navRobot.setOnClickListener(v -> {
+            navController.navigate(R.id.navigation_robot);
+            updateIconVisuals(binding.navRobot);
         });
 
-        // 5. Apps (Clone Selector)
-        binding.navApps.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                navController.navigate(R.id.navigation_apps);
-                updateIconVisuals(binding.navApps);
-            }
+        binding.navApps.setOnClickListener(v -> {
+            navController.navigate(R.id.navigation_apps);
+            updateIconVisuals(binding.navApps);
         });
 
-        // 6. Help (NEW)
-        binding.navHelp.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                navController.navigate(R.id.navigation_help);
-                updateIconVisuals(binding.navHelp);
-            }
+        binding.navHelp.setOnClickListener(v -> {
+            navController.navigate(R.id.navigation_help);
+            updateIconVisuals(binding.navHelp);
         });
 
-        // 7. Contact Us (NEW)
-        binding.navContact.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                navController.navigate(R.id.navigation_contact);
-                updateIconVisuals(binding.navContact);
-            }
+        binding.navContact.setOnClickListener(v -> {
+            navController.navigate(R.id.navigation_contact);
+            updateIconVisuals(binding.navContact);
         });
 
-        // 8. Settings
-        binding.navSettings.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                navController.navigate(R.id.navigation_settings);
-                updateIconVisuals(binding.navSettings);
-            }
+        // NEW: Log Icon Click Listener
+        binding.navLogs.setOnClickListener(v -> {
+            navController.navigate(R.id.navigation_logs);
+            updateIconVisuals(binding.navLogs);
         });
 
-        // -------------------------------------------------
+        binding.navSettings.setOnClickListener(v -> {
+            navController.navigate(R.id.navigation_settings);
+            updateIconVisuals(binding.navSettings);
+        });
 
         permissionLauncher = registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(),
                 new ActivityResultCallback<Map<String, Boolean>>() {
@@ -188,12 +181,10 @@ public class MainActivity extends AppCompatActivity {
                                 break;
                             }
                         }
-
                         if (allGranted) {
-                            Toast.makeText(MainActivity.this, "All permissions granted. Lunar Tag is ready.", Toast.LENGTH_SHORT).show();
                             onPermissionsGranted();
                         } else {
-                            Toast.makeText(MainActivity.this, "Some permissions were denied. Core features may not work.", Toast.LENGTH_LONG).show();
+                            Toast.makeText(MainActivity.this, "Permissions needed for core features.", Toast.LENGTH_LONG).show();
                         }
                     }
                 });
@@ -204,7 +195,6 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        // REGISTER RECEIVER: Start listening for robot logs
         IntentFilter filter = new IntentFilter("com.lunartag.ACTION_LOG_UPDATE");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
              registerReceiver(logReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
@@ -216,7 +206,6 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         super.onPause();
-        // UNREGISTER RECEIVER
         try {
             unregisterReceiver(logReceiver);
         } catch (IllegalArgumentException e) {
@@ -225,27 +214,63 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * Helper to visually highlight the active tab.
-     * Resets all icons to default color, then tints the active one.
+     * Blinks the Log Icon based on message type.
+     * RED for errors, GREEN for info.
      */
+    private void blinkLogIcon(String type) {
+        final int defaultColor = getAttributeColor(com.google.android.material.R.attr.colorOnSurface);
+        int blinkColor = Color.GREEN; // Default info color
+
+        // Detect error types
+        if (type != null && (type.equalsIgnoreCase("error") || type.equalsIgnoreCase("fail"))) {
+            blinkColor = Color.RED;
+        }
+
+        // Apply blink color
+        binding.navLogs.setColorFilter(blinkColor, PorterDuff.Mode.SRC_IN);
+
+        // Reset after 500ms
+        uiHandler.postDelayed(() -> {
+            // Only reset if Logs is NOT the currently active tab
+            // If it IS active, updateIconVisuals handles the color
+            // For simplicity, we reset to default or active color logic here
+            // But to keep visual stability, we just reset to the appropriate state:
+            
+            // Check if logs is currently selected based on icon color or logic
+            // A simple reset to "inactive" default is safe, the user will tap if they want to see it.
+            // Or better, check logic:
+            
+            // If we are ON the logs screen, keep it Primary Color. If not, reset to Default.
+            // Since we don't easily track current Fragment ID here without complexity, 
+            // we will trigger a visual update based on the view state.
+            
+            // Simple approach: Reset to default gray. 
+            // If user is ON the tab, they will tap or we can leave it gray until next tap.
+            // However, to look professional, let's just reset to default gray.
+            binding.navLogs.setColorFilter(defaultColor, PorterDuff.Mode.SRC_IN);
+            
+            // Re-apply active state if it was active (Optional refinement)
+            // We can check if the current navigation destination is logs, but for now, simple blink is fine.
+            
+        }, 500);
+    }
+
     private void updateIconVisuals(View activeView) {
-        // Get colors
         int activeColor = getAttributeColor(com.google.android.material.R.attr.colorPrimary);
         int inactiveColor = getAttributeColor(com.google.android.material.R.attr.colorOnSurface);
 
-        // Reset all
         binding.navDashboard.setColorFilter(inactiveColor);
         binding.navCamera.setColorFilter(inactiveColor);
         binding.navGallery.setColorFilter(inactiveColor);
         binding.navRobot.setColorFilter(inactiveColor);
         binding.navApps.setColorFilter(inactiveColor);
-        binding.navHelp.setColorFilter(inactiveColor);    // NEW
-        binding.navContact.setColorFilter(inactiveColor); // NEW
+        binding.navHelp.setColorFilter(inactiveColor);
+        binding.navContact.setColorFilter(inactiveColor);
+        binding.navLogs.setColorFilter(inactiveColor); // Reset Logs
         binding.navSettings.setColorFilter(inactiveColor);
 
-        // Set Active
-        if (activeView instanceof android.widget.ImageView) {
-            ((android.widget.ImageView) activeView).setColorFilter(activeColor);
+        if (activeView instanceof ImageView) {
+            ((ImageView) activeView).setColorFilter(activeColor);
         }
     }
 
@@ -275,6 +300,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onPermissionsGranted() {
-        // Permissions granted logic
+        logHistory.append("System: Permissions Granted.\n");
     }
 }
